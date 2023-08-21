@@ -1,0 +1,19 @@
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "--cov"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[project]
+name = "codeowners"
+version = "1.0.0"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[project.scripts]
+codeowners = "codeowners.cli:cli"
+
+[tool.setuptools]
+packages = ["codeowners"]

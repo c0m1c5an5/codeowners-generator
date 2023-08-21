@@ -1,0 +1,8 @@
+- id: codeowners
+  name: "Update CODEOWNERS file"
+  description: "Update CODEOWNERS file from git annotate"
+  entry: codeowners
+  language: python
+  language_version: python3.11
+  types: ["text"]
+  require_serial: true
