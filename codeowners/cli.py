@@ -108,7 +108,7 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
     for f in files.union(conflict_files):
         file = f.resolve()
         if workdir in file.parents and file in staged_files:
-            files.add(file)
+            filtered_files.add(file)
 
     try:
         updated_owners_mapping = update_owners_mapping(
