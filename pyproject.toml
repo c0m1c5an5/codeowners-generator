@@ -13,7 +13,42 @@ dynamic = ["dependencies"]
 dependencies = { file = ["requirements.txt"] }
 
 [project.scripts]
-codeowners = "codeowners.cli:cli"
+codeowners = "codeowners.__main__:main"
 
 [tool.setuptools]
 packages = ["codeowners"]
+
+[tool.ruff]
+pydocstyle.convention = "google"
+select = [
+    "RUF", # Ruff-specific rules
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "D",   # pydocstyle
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "C",   # flake8-comprehensions
+    "B",   # flake8-bugbear
+    "ANN", # flake8-annotations
+    "S",   # flake8-bandit
+    "PL",  # Pylint
+    "TRY", # tryceratops
+    "EM",  # flake8-errmsg
+    "C4",  # flake8-comprehensions
+    "Q",   # flake8-quotes
+    "SIM", # flake8-simplify
+    "PTH", # flake8-use-pathlib
+]
+ignore = [
+    "E501",    # Line too long, handled by black
+    "ANN101",  # Missing type annotation for `self` in method
+    "S603",    # `subprocess` call: check for execution of untrusted input
+    "S607",    # Starting a process with a partial executable path
+    "D107",    # Missing docstring in `__init__`
+    "D101",    # Missing docstring in public class
+    "D100",    # Missing docstring in public module
+    "D211",    # No blank lines allowed before class docstring
+    "D213",    # Multi-line docstring summary should start at the second line
+    "PLR2004", # Magic value used in comparison
+]
