@@ -343,8 +343,8 @@ def dump_codeowners(
     """Dump codeowners rules to a file.
 
     Args:
-        codeowners_file (Path): Codeowners file.workdir: Path
-        workdir (Path): Path are written relative to this directory
+        codeowners_file (Path): Codeowners file
+        workdir (Path): Paths are written relative to this directory
         owners_mapping (Dict[str, Set[str]]): Map of file paths to owners
 
     Raises:
@@ -367,7 +367,7 @@ def dump_codeowners(
 
             for file in sorted(owners_mapping.keys()):
                 f.write(
-                    escape_glob(str(file.relative_to(workdir)))
+                    escape_glob(str(file.relative_to(workdir).as_posix()))
                     + " "
                     + " ".join(sorted(owners_mapping[file]))
                     + "\n"
