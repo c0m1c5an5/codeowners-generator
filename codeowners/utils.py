@@ -149,7 +149,7 @@ def get_git_staged_files() -> Set[Path]:
         )
         items = files_output.stdout.split(b"\x00")
         items.pop()
-        result: set = set()
+        result: set[Path] = set()
         for item in items:
             path = item.decode(encoding="utf-8")
             result.add(Path(path))
@@ -161,7 +161,7 @@ def get_git_staged_files() -> Set[Path]:
         return result
 
 
-def validate_user_map(user_map: Dict) -> None:
+def validate_user_map(user_map: Dict[str, str]) -> None:
     """Validate user map data structure.
 
     Args:

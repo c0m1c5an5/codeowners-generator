@@ -44,6 +44,7 @@ ignore = [
     "ANN101",  # Missing type annotation for `self` in method
     "D100",    # Missing docstring in public module
     "D101",    # Missing docstring in public class
+    "D104",    # Missing docstring in public package
     "D107",    # Missing docstring in `__init__`
     "D211",    # No blank lines allowed before class docstring
     "D213",    # Multi-line docstring summary should start at the second line
