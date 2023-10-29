@@ -5,20 +5,34 @@
 # PLR0915 Too many statements
 
 import argparse
+import json
+import logging
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Set
 
-from codeowners.exceptions import Error
+import jsonschema
+
+from codeowners.exceptions import (
+    CommandError,
+    GitAnnotateError,
+    GitEmailEmptyError,
+    MissingOwnersError,
+    SectionsNotSupportedError,
+)
 from codeowners.utils import (
     dump_codeowners,
     get_git_email,
+    get_git_root,
     get_git_staged_files,
-    load_user_map,
     parse_codeowners,
-    print_err,
     update_owners_mapping,
+    validate_user_map,
 )
+
+logging.basicConfig(format="%(levelname)s: %(filename)s:%(lineno)d %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def cli(argv: List[str] = sys.argv[1:]) -> int:
@@ -28,10 +42,13 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
         argv (List[str], optional): Input arguments. Defaults to sys.argv[1:].
 
     Returns:
-        int: Return code
+        int: Return code.
     """
     parser = argparse.ArgumentParser(
-        description="Generate CODEOWNERS file from git repo.",
+        prog="codeowners", description="Generate CODEOWNERS file from git repo."
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true", default=False, help="verbose output"
     )
     parser.add_argument(
         "-o",
@@ -67,48 +84,90 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
     threshold: float = args.threshold
     files: Set[Path] = set(args.files)
     user_id_map: Dict[str, str] = {}
-    workdir: Path = Path.cwd()
+    verbose: bool = args.verbose
+
+    if verbose or os.environ.get("DEBUG") not in [None, "false", "no", "0"]:
+        logger.setLevel(logging.DEBUG)
+
+    logger.debug(f"Args: {args._get_kwargs()}")
+
+    try:
+        git_root = get_git_root()
+    except CommandError as e:
+        logger.error(f"Unable to get git root: {e!s}")
+        return 1
+
+    logger.debug(f"Git root: {git_root}")
+
+    os.chdir(git_root)
 
     try:
         default_email = get_git_email()
-    except Error as e:
-        print_err(f"Error: Unable to get email form git: {e!s}")
+    except (GitEmailEmptyError, CommandError) as e:
+        logger.error(f"Unable to get email form git: {e!s}")
         return 1
+
+    logger.debug(f"Default email: {default_email}")
 
     try:
         staged_files = get_git_staged_files()
-        staged_files.discard(codeowners_file.resolve())
-    except Error as e:
-        print_err(f"Error: Unable to staged files form git: {e!s}")
+        staged_files.discard(codeowners_file)
+    except CommandError as e:
+        logger.error(f"Unable to staged files form git: {e!s}")
         return 1
 
-    try:
-        if user_map_file:
-            user_id_map = load_user_map(user_map_file)
-        else:
-            print_err(
-                "Warning: User map not provided. All owners will appear as committer email."
-            )
-    except Error as e:
-        print_err(f"Error: Decoding user map '{user_map_file!s}' failed: {e!s}")
-        return 1
+    logger.debug(f"Staged files: {staged_files}")
 
-    try:
-        (owners_mapping, conflict_files) = parse_codeowners(codeowners_file)
-    except Error as e:
-        print_err(f"Error: Parsing '{codeowners_file!s}' failed: {e!s}")
-        return 1
+    if user_map_file:
+        with user_map_file.open("r") as user_map_stream:
+            try:
+                user_id_map = json.load(user_map_stream)
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(f"Failed load json file '{user_map_file!s}': {e!s}")
+                return 1
+            except OSError as e:
+                logger.error(f"Failed to access '{user_map_file!s}': {e.strerror}")
+                return 1
+
+        logger.debug(f"User map: {user_id_map}")
+
+        try:
+            validate_user_map(user_id_map)
+        except jsonschema.ValidationError as e:
+            logger.error(f"Invalid user map '{user_map_file!s}': {e!s}")
+            return 1
+    else:
+        logger.warn("User map not provided. All owners will appear as committer email.")
+
+    owners_mapping: Dict[Path, Set[str]] = {}
+    conflict_files: Set[Path] = set()
+
+    if codeowners_file.is_file():
+        try:
+            (owners_mapping, conflict_files) = parse_codeowners(codeowners_file)
+        except (SectionsNotSupportedError, MissingOwnersError) as e:
+            logger.error(f"Parsing '{codeowners_file!s}' failed: {e!s}")
+            return 1
+        except OSError as e:
+            logger.error(f"Parsing '{codeowners_file!s}' failed {e.strerror}")
+            return 1
+
+    logger.debug(f"Owners mapping: {owners_mapping!s}")
+    logger.debug(f"Conflict files: {conflict_files!s}")
 
     filtered_owners_mapping: Dict[Path, Set[str]] = {}
     for k, v in owners_mapping.items():
-        if workdir in k.parents and k in staged_files:
+        if k in staged_files:
             filtered_owners_mapping[k] = v
+
+    logger.debug(f"Filtered owners mapping: {filtered_owners_mapping!s}")
 
     filtered_files: Set[Path] = set()
     for f in files.union(conflict_files):
-        file = f.resolve()
-        if workdir in file.parents and file in staged_files:
-            filtered_files.add(file)
+        if f in staged_files:
+            filtered_files.add(f)
+
+    logger.debug(f"Filtered files: {filtered_files!s}")
 
     try:
         updated_owners_mapping = update_owners_mapping(
@@ -119,14 +178,18 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
             threshold,
             user_id_map,
         )
-    except Error as e:
-        print_err(f"Error: Updating owners table failed: {e!s}")
+    except (GitAnnotateError, CommandError) as e:
+        logger.error(f"Updating owners table failed: {e!s}")
         return 1
 
+    logger.debug(f"Updated owners mapping: {updated_owners_mapping!s}")
+
     try:
-        dump_codeowners(codeowners_file, workdir, updated_owners_mapping)
-    except Error as e:
-        print_err(f"Error: Dumping rules to '{codeowners_file!s}' failed: {e!s}")
+        dump_codeowners(codeowners_file, updated_owners_mapping)
+    except OSError as e:
+        logger.error(f"Dumping rules to '{codeowners_file!s}' failed: {e!s}")
         return 1
+    else:
+        logger.debug(f"Dumping rules to '{codeowners_file!s}' succeeded")
 
     return 0

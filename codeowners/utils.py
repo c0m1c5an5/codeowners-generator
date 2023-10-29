@@ -1,25 +1,19 @@
 import json
 import re
 import subprocess
-import sys
 from collections import defaultdict
-from json import JSONDecodeError
 from pathlib import Path
 from subprocess import CalledProcessError
 from typing import Dict, Set, Tuple
 
 import jsonschema
-from jsonschema.exceptions import ValidationError
 
 from codeowners.exceptions import (
     CommandError,
-    FileAccessError,
     GitAnnotateError,
     GitEmailEmptyError,
-    MalformedMergeConflictError,
     MissingOwnersError,
     SectionsNotSupportedError,
-    UserMapParseError,
 )
 
 EMAIL_RE = re.compile(r"^[a-z\d]+\s+\(<([\d\w.@]+?)>.*$")
@@ -41,10 +35,10 @@ def escape_glob(input: str) -> str:
     """Escape glob special characters in string.
 
     Args:
-        input (str): Input string
+        input (str): Input string.
 
     Returns:
-        str: Escaped string
+        str: Escaped string.
     """
     escaped_str = ""
     for char in input:
@@ -59,10 +53,10 @@ def unescape_glob(input: str) -> str:
     """Unescape glob special characters in string.
 
     Args:
-        input (str): Input string
+        input (str): Input string.
 
     Returns:
-        _type_: Unescaped string
+        _type_: Unescaped string.
     """
     unescaped_str = ""
     input_length = len(input)
@@ -79,23 +73,14 @@ def unescape_glob(input: str) -> str:
     return unescaped_str
 
 
-def print_err(message: str) -> None:
-    """Print to stderr.
-
-    Args:
-        message (str): Message to print
-    """
-    print(message, file=sys.stderr)
-
-
 def is_binary_file(file: Path) -> bool:
     """Check if file is binary.
 
     Args:
-        file (Path): File to check
+        file (Path): File to check.
 
     Returns:
-        bool: Is the file binary
+        bool: Is the file binary.
     """
     with file.open("rb") as f:
         data = f.read(2048)
@@ -106,26 +91,59 @@ def is_empty(file: Path) -> bool:
     """Check if file is empty.
 
     Args:
-        file (Path): File to check
+        file (Path): File to check.
 
     Returns:
-        bool: Is the file empty
+        bool: Is the file empty.
     """
     return file.stat().st_size == 0
+
+
+def get_git_root() -> Path:
+    """Get git root directory.
+
+    Raises:
+        CommandError: Git command failed.
+
+    Returns:
+        Path: Git root directory path.
+    """
+    try:
+        rev_parse_output = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            text=True,
+            universal_newlines=True,
+            capture_output=True,
+            check=True,
+        )
+        git_root = Path(rev_parse_output.stdout.strip())
+    except CalledProcessError as e:
+        stderr: str = e.stderr.decode(encoding="utf-8")
+        stderr = json.dumps(stderr.strip())
+        raise CommandError(stderr) from e
+    else:
+        return git_root
 
 
 def get_git_staged_files() -> Set[Path]:
     """Get all staged files.
 
     Raises:
-        CommandError: Git command failed
+        CommandError: Git command failed.
 
     Returns:
-        Set[Path]: Staged files
+        Set[Path]: Staged files.
     """
     try:
         files_output = subprocess.run(
-            ["git", "ls-files", "-z", "--deduplicate"],
+            [
+                "git",
+                "ls-files",
+                "-z",
+                "--deduplicate",
+                "--empty-directory",
+                "--full-name",
+            ],
             capture_output=True,
             check=True,
         )
@@ -134,51 +152,33 @@ def get_git_staged_files() -> Set[Path]:
         result: set = set()
         for item in items:
             path = item.decode(encoding="utf-8")
-            result.add(Path(path).resolve())
+            result.add(Path(path))
     except CalledProcessError as e:
-        raise CommandError(e) from e
+        stderr: str = e.stderr.decode(encoding="utf-8")
+        stderr = json.dumps(stderr.strip())
+        raise CommandError(stderr) from e
     else:
         return result
 
 
-def load_user_map(map_file: Path) -> Dict:
-    """Load user map to dict.
+def validate_user_map(user_map: Dict) -> None:
+    """Validate user map data structure.
 
     Args:
-        map_file (Path): Json file.
+        user_map (Dict): User map.
 
     Raises:
-        UserMapParseError: File parsing failed
-        FileAccessError: Unable to access file
-
-    Returns:
-        Dict: Mapping of committer emails to user ids.
+        ValidationError: When data is invalid.
     """
-    try:
-        with map_file.open("r") as f:
-            try:
-                data = json.load(f)
-            except JSONDecodeError as e:
-                raise UserMapParseError(str(e)) from e
-            except TypeError as e:
-                raise UserMapParseError(str(e)) from e
-    except OSError as e:
-        raise FileAccessError(e) from e
-
-    try:
-        jsonschema.validate(data, USER_ID_MAP_SCHEMA)
-    except ValidationError as e:
-        raise UserMapParseError(str(e)) from e
-
-    return data
+    jsonschema.validate(user_map, USER_ID_MAP_SCHEMA)
 
 
 def get_git_email() -> str:
     """Get current git user email.
 
     Raises:
-        GitEmailEmptyError: Email is an empty string
-        CalledProcessError: Git command failed
+        GitEmailEmptyError: Email is an empty string.
+        CommandError: Git command failed.
 
     Returns:
         str: Email
@@ -195,7 +195,9 @@ def get_git_email() -> str:
         if not email:
             raise GitEmailEmptyError()
     except CalledProcessError as e:
-        raise CommandError(e) from e
+        stderr: str = e.stderr
+        stderr = json.dumps(stderr.strip())
+        raise CommandError(stderr) from e
     else:
         return email
 
@@ -209,17 +211,17 @@ def get_git_owners(
     """Calculate owners of file based on git annotate output.
 
     Args:
-        file (Path): Target file
-        default_email (str): Email to replace <not.committed.yet> with
-        threshold (float): Contribution percentage required for committer to be considered an owner
-        user_id_map (Dict[str, str]): Mapping of committer emails to user ids
+        file (Path): Target file.
+        default_email (str): Email to replace <not.committed.yet> with.
+        threshold (float): Contribution percentage required for committer to be considered an owner.
+        user_id_map (Dict[str, str]): Mapping of committer emails to user ids.
 
     Raises:
-        GitAnnotateError: Failed to parse annotate output
-        CalledProcessError: Git command failed
+        GitAnnotateError: Failed to parse annotate output.
+        CommandError: Git command failed.
 
     Returns:
-        Set[str]: File owners
+        Set[str]: File owners.
     """
     try:
         annotate_output = subprocess.run(
@@ -230,7 +232,9 @@ def get_git_owners(
             check=True,
         )
     except CalledProcessError as e:
-        raise CommandError(e) from e
+        stderr: str = e.stderr
+        stderr = json.dumps(stderr.strip())
+        raise CommandError(stderr) from e
 
     contributions: Dict[str, int] = defaultdict(int)
     lines_total = 0
@@ -262,118 +266,91 @@ def get_git_owners(
     return owners
 
 
-def parse_codeowners(  # noqa: C901
+def parse_codeowners(
     codeowners_file: Path,
 ) -> Tuple[Dict[Path, Set[str]], Set[Path]]:
     """Parse codeowners file into a dict.
 
     Args:
-        codeowners_file (Path): Codeowners file
-        workdir (Path): Parse root directory
+        codeowners_file (Path): Codeowners file.
+        workdir (Path): Parse root directory.
 
     Raises:
-        SectionsNotSupportedError: Encountered section
-        MissingOwnersError: No owner provided for file
+        SectionsNotSupportedError: Encountered section.
+        MissingOwnersError: No owner provided for file.
+        OSError: When unable to access file.
 
     Returns:
-        Tuple[Dict[Path, Set[str]], Set[Path]]: Map of files to owners and a set of merge conflict files
+        Tuple[Dict[Path, Set[str]], Set[Path]]: Map of files to owners and a set of merge conflict files.
     """
     line_number = 0
-    git_merge_conflict = "no_conflict"
     conflict_files: Set[Path] = set()
     owners_mapping: Dict[Path, Set[str]] = {}
 
-    try:
-        with codeowners_file.open("r") as f:
-            while True:
-                line = f.readline()
-                line_number += 1
-                if not line:
-                    break
+    with codeowners_file.open("r") as f:
+        while True:
+            line = f.readline()
+            line_number += 1
+            if not line:
+                break
 
-                tokens = line.split()
+            tokens = line.split()
 
-                if not tokens or tokens[0].startswith("#"):
-                    continue
-                elif tokens[0].startswith("["):
-                    raise SectionsNotSupportedError(line_number)
-                elif (
-                    tokens[0] == "<<<<<<<"
-                    and git_merge_conflict == "no_conflict"
-                    and len(tokens) == 2
-                ):
-                    git_merge_conflict = "conflict_head"
-                elif (
-                    tokens[0] == "======="
-                    and git_merge_conflict == "conflict_head"
-                    and len(tokens) == 1
-                ):
-                    git_merge_conflict = "conflict_branch"
-                elif (
-                    tokens[0] == ">>>>>>>"
-                    and git_merge_conflict == "conflict_branch"
-                    and len(tokens) == 3
-                ):
-                    git_merge_conflict = "no_conflict"
-                elif len(tokens) < 2:
-                    raise MissingOwnersError(line_number)
+            if (
+                not tokens
+                or tokens[0].startswith("#")
+                or tokens[0] in ["<<<<<<<", "=======", ">>>>>>>"]
+            ):
+                continue
+            elif tokens[0].startswith("["):
+                raise SectionsNotSupportedError(line_number)
+            elif len(tokens) < 2:
+                raise MissingOwnersError(line_number)
 
-                (path, owners) = (unescape_glob(tokens[0]), set(tokens[1:]))
-                file = Path(path).resolve()
+            (path, owners) = (unescape_glob(tokens[0]), set(tokens[1:]))
+            file = Path(path)
 
-                if git_merge_conflict == "no_conflict":
-                    current_owners = owners_mapping.get(file)
-                    if current_owners:
-                        owners_mapping[file] = current_owners.union(owners)
-                    else:
-                        owners_mapping[file] = owners
-                else:
-                    conflict_files.add(file)
-        if git_merge_conflict != "no_conflict":
-            raise MalformedMergeConflictError(line_number)
-    except OSError as e:
-        raise FileAccessError(e) from e
-    else:
-        return (owners_mapping, conflict_files)
+            if owners_mapping.get(file):
+                conflict_files.add(file)
+            else:
+                owners_mapping[file] = owners
+
+    return (owners_mapping, conflict_files)
 
 
 def dump_codeowners(
-    codeowners_file: Path, workdir: Path, owners_mapping: Dict[Path, Set[str]]
+    codeowners_file: Path, owners_mapping: Dict[Path, Set[str]]
 ) -> None:
     """Dump codeowners rules to a file.
 
     Args:
-        codeowners_file (Path): Codeowners file
-        workdir (Path): Paths are written relative to this directory
-        owners_mapping (Dict[str, Set[str]]): Map of file paths to owners
+        codeowners_file (Path): Codeowners file.
+        owners_mapping (Dict[str, Set[str]]): Map of file paths to owners.
 
     Raises:
-        FileAccessError: Unable to access file
+        OSError: When unable to access file.
     """
-    try:
-        with codeowners_file.open("w") as f:
-            f.write(
-                "#####################################################################\n"
-            )
-            f.write(
-                "# This file is generated by pre-commit. Do not edit it manually.    #\n"
-            )
-            f.write(
-                "# Leave merge conflicts as is. They will be resolved by pre-commit. #\n"
-            )
-            f.write(
-                "#####################################################################\n\n"
-            )
+    with codeowners_file.open("w") as f:
+        f.write(
+            "#####################################################################\n"
+        )
+        f.write(
+            "# This file is generated by pre-commit. Do not edit it manually.    #\n"
+        )
+        f.write(
+            "# Leave merge conflicts as is. They will be resolved by pre-commit. #\n"
+        )
+        f.write(
+            "#####################################################################\n\n"
+        )
 
-            for file in sorted(owners_mapping.keys()):
-                f.write(
-                    escape_glob(str(file.relative_to(workdir).as_posix()))
-                    + " "
-                    + " ".join(sorted(owners_mapping[file]))
-                    + "\n"
-                )
-    except OSError as e:
-        raise FileAccessError(e) from e
+        for file in sorted(owners_mapping.keys()):
+            f.write(
+                escape_glob(str(file.as_posix()))
+                + " "
+                + " ".join(sorted(owners_mapping[file]))
+                + "\n"
+            )
 
 
 def update_owners_mapping(  # noqa: PLR0913
@@ -387,18 +364,19 @@ def update_owners_mapping(  # noqa: PLR0913
     """Update file entries in owners mapping.
 
     Args:
-        owners_mapping (Dict[Path, Set[str]]): Source map of file paths to owners
-        files (List[Path]): Files to update
-        codeowners_file (Path): Codeowners file to exclude from update
-        default_email (str): Email to replace <not.committed.yet> with
-        threshold (float): Contribution percentage required for committer to be considered an owner
-        user_id_map (Dict[str, str]): Mapping of committer emails to user ids
+        owners_mapping (Dict[Path, Set[str]]): Source map of file paths to owners.
+        files (List[Path]): Files to update.
+        codeowners_file (Path): Codeowners file to exclude from update.
+        default_email (str): Email to replace <not.committed.yet> with.
+        threshold (float): Contribution percentage required for committer to be considered an owner.
+        user_id_map (Dict[str, str]): Mapping of committer emails to user ids.
 
     Raises:
-        UpdateError: When file owner calculation fails
+        GitAnnotateError: Failed to parse annotate output.
+        CommandError: Git command failed.
 
     Returns:
-        Dict[Path, Set[str]]: Map of files to owners
+        Dict[Path, Set[str]]: Map of files to owners.
     """
     result: Dict[Path, Set[str]] = owners_mapping.copy()
     for file in files:
