@@ -119,15 +119,16 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
     logger.debug(f"Staged files: {staged_files}")
 
     if user_map_file:
-        with user_map_file.open("r") as user_map_stream:
-            try:
-                user_id_map = json.load(user_map_stream)
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.error(f"Failed load json file '{user_map_file!s}': {e!s}")
-                return 1
-            except OSError as e:
-                logger.error(f"Failed to access '{user_map_file!s}': {e.strerror}")
-                return 1
+        try:
+            with user_map_file.open("r") as user_map_stream:
+                try:
+                    user_id_map = json.load(user_map_stream)
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.error(f"Failed load json file '{user_map_file!s}': {e!s}")
+                    return 1
+        except OSError as e:
+            logger.error(f"Failed to access '{user_map_file!s}': {e.strerror}")
+            return 1
 
         logger.debug(f"User map: {user_id_map}")
 
@@ -144,7 +145,10 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
 
     if codeowners_file.is_file():
         try:
-            (owners_mapping, conflict_files) = parse_codeowners(codeowners_file)
+            with codeowners_file.open("r") as codeowners_in_stream:
+                (owners_mapping, conflict_files) = parse_codeowners(
+                    codeowners_in_stream
+                )
         except (SectionsNotSupportedError, MissingOwnersError) as e:
             logger.error(f"Parsing '{codeowners_file!s}' failed: {e!s}")
             return 1
@@ -185,7 +189,8 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
     logger.debug(f"Updated owners mapping: {updated_owners_mapping!s}")
 
     try:
-        dump_codeowners(codeowners_file, updated_owners_mapping)
+        with codeowners_file.open("w") as codeowners_out_stream:
+            dump_codeowners(codeowners_out_stream, updated_owners_mapping)
     except OSError as e:
         logger.error(f"Dumping rules to '{codeowners_file!s}' failed: {e!s}")
         return 1

@@ -18,6 +18,9 @@ codeowners = "codeowners.__main__:main"
 [tool.setuptools]
 packages = ["codeowners"]
 
+[tool.isort]
+profile = "black"
+
 [tool.ruff]
 pydocstyle.convention = "google"
 select = [
