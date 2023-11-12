@@ -12,15 +12,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Set
 
-import jsonschema
-
-from codeowners.exceptions import (
-    CommandError,
-    GitAnnotateError,
-    GitEmailEmptyError,
-    MissingOwnersError,
-    SectionsNotSupportedError,
-)
 from codeowners.utils import (
     dump_codeowners,
     get_git_email,
@@ -93,8 +84,8 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
 
     try:
         git_root = get_git_root()
-    except CommandError as e:
-        logger.error(f"Unable to get git root: {e!s}")
+    except Exception as e:
+        logger.error(f"Unable to get git root: {e!s}", exc_info=verbose)
         return 1
 
     logger.debug(f"Git root: {git_root}")
@@ -103,8 +94,8 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
 
     try:
         default_email = get_git_email()
-    except (GitEmailEmptyError, CommandError) as e:
-        logger.error(f"Unable to get email form git: {e!s}")
+    except Exception as e:
+        logger.error(f"Unable to get email form git: {e!s}", exc_info=verbose)
         return 1
 
     logger.debug(f"Default email: {default_email}")
@@ -112,8 +103,8 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
     try:
         staged_files = get_git_staged_files()
         staged_files.discard(codeowners_file)
-    except CommandError as e:
-        logger.error(f"Unable to staged files form git: {e!s}")
+    except Exception as e:
+        logger.error(f"Unable to staged files form git: {e!s}", exc_info=verbose)
         return 1
 
     logger.debug(f"Staged files: {staged_files}")
@@ -123,19 +114,31 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
             with user_map_file.open("r") as user_map_stream:
                 try:
                     user_id_map = json.load(user_map_stream)
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.error(f"Failed load json file '{user_map_file!s}': {e!s}")
+                except Exception as e:
+                    logger.error(
+                        f"Failed load json file '{user_map_file!s}': {e!s}",
+                        exc_info=verbose,
+                    )
                     return 1
         except OSError as e:
-            logger.error(f"Failed to access '{user_map_file!s}': {e.strerror}")
+            logger.error(
+                f"Failed to access '{user_map_file!s}': {e.strerror}", exc_info=verbose
+            )
+            return 1
+        except Exception as e:
+            logger.error(
+                f"Failed to access '{user_map_file!s}': {e!s}", exc_info=verbose
+            )
             return 1
 
         logger.debug(f"User map: {user_id_map}")
 
         try:
             validate_user_map(user_id_map)
-        except jsonschema.ValidationError as e:
-            logger.error(f"Invalid user map '{user_map_file!s}': {e!s}")
+        except Exception as e:
+            logger.error(
+                f"Invalid user map '{user_map_file!s}': {e!s}", exc_info=verbose
+            )
             return 1
     else:
         logger.warn("User map not provided. All owners will appear as committer email.")
@@ -149,11 +152,15 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
                 (owners_mapping, conflict_files) = parse_codeowners(
                     codeowners_in_stream
                 )
-        except (SectionsNotSupportedError, MissingOwnersError) as e:
-            logger.error(f"Parsing '{codeowners_file!s}' failed: {e!s}")
-            return 1
         except OSError as e:
-            logger.error(f"Parsing '{codeowners_file!s}' failed {e.strerror}")
+            logger.error(
+                f"Parsing '{codeowners_file!s}' failed {e.strerror}", exc_info=verbose
+            )
+            return 1
+        except Exception as e:
+            logger.error(
+                f"Parsing '{codeowners_file!s}' failed {e!s}", exc_info=verbose
+            )
             return 1
 
     logger.debug(f"Owners mapping: {owners_mapping!s}")
@@ -182,8 +189,8 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
             threshold,
             user_id_map,
         )
-    except (GitAnnotateError, CommandError) as e:
-        logger.error(f"Updating owners table failed: {e!s}")
+    except Exception as e:
+        logger.error(f"Updating owners table failed: {e!s}", exc_info=verbose)
         return 1
 
     logger.debug(f"Updated owners mapping: {updated_owners_mapping!s}")
@@ -192,7 +199,15 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
         with codeowners_file.open("w") as codeowners_out_stream:
             dump_codeowners(codeowners_out_stream, updated_owners_mapping)
     except OSError as e:
-        logger.error(f"Dumping rules to '{codeowners_file!s}' failed: {e!s}")
+        logger.error(
+            f"Dumping rules to '{codeowners_file!s}' failed: {e.strerror}",
+            exc_info=verbose,
+        )
+        return 1
+    except Exception as e:
+        logger.error(
+            f"Dumping rules to '{codeowners_file!s}' failed: {e!s}", exc_info=verbose
+        )
         return 1
     else:
         logger.debug(f"Dumping rules to '{codeowners_file!s}' succeeded")
