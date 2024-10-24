@@ -63,6 +63,14 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
         help="path to user map",
     )
     parser.add_argument(
+        "-a",
+        "--admin",
+        action="append",
+        type=str,
+        default=[],
+        help="ids of admin uses (added as codeowner to every file)",
+    )
+    parser.add_argument(
         "files",
         nargs="+",
         type=Path,
@@ -73,6 +81,7 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
     codeowners_file: Path = args.out
     user_map_file: Path = args.user_map
     threshold: float = args.threshold
+    admins: Set[str] = set(args.admin)
     files: Set[Path] = set(args.files)
     user_id_map: Dict[str, str] = {}
     verbose: bool = args.verbose
@@ -166,18 +175,10 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
     logger.debug(f"Owners mapping: {owners_mapping!s}")
     logger.debug(f"Conflict files: {conflict_files!s}")
 
-    filtered_owners_mapping: Dict[Path, Set[str]] = {}
-    for k, v in owners_mapping.items():
-        if k in staged_files:
-            filtered_owners_mapping[k] = v
-
+    filtered_owners_mapping = { k: v for k, v in owners_mapping.items() if k in staged_files }
     logger.debug(f"Filtered owners mapping: {filtered_owners_mapping!s}")
 
-    filtered_files: Set[Path] = set()
-    for f in files.union(conflict_files):
-        if f in staged_files:
-            filtered_files.add(f)
-
+    filtered_files = set(f for f in files.union(conflict_files) if f in staged_files)
     logger.debug(f"Filtered files: {filtered_files!s}")
 
     try:
@@ -194,6 +195,10 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
         return 1
 
     logger.debug(f"Updated owners mapping: {updated_owners_mapping!s}")
+
+    if admins:
+        updated_owners_mapping = { k: v.union(admins) for k, v in updated_owners_mapping.items() }
+        logger.debug(f"Updated owners mapping with admins: {updated_owners_mapping!s}")
 
     try:
         with codeowners_file.open("w") as codeowners_out_stream:
