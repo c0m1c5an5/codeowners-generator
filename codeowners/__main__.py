@@ -3,7 +3,8 @@ import sys
 from codeowners.cli import cli
 
 
-def main() -> None:  # noqa: D103
+def main() -> None:
+    """Run the cli and exit with its return code."""
     sys.exit(cli())
 
 

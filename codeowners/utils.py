@@ -1,24 +1,35 @@
-import json
+import os
 import re
 import subprocess
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from subprocess import CalledProcessError
-from typing import Dict, Set, TextIO, Tuple
+from typing import Dict, Iterable, NamedTuple, Set, TextIO, Tuple
 
 import jsonschema
 
 from codeowners.exceptions import (
-    CommandError,
     GitAnnotateError,
+    GitAuthorMissingError,
     GitEmailEmptyError,
-    MissingOwnersError,
-    SectionsNotSupportedError,
 )
 
-EMAIL_RE = re.compile(r"^[a-z\d]+\s+\(<([\d\w.@]+?)>.*$")
 TEXTCHARS = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7F})
-GLOBCHARS = {" ", "*", "!", "\\", "[", "]"}
+GLOBCHARS = frozenset({" ", "*", "!", "\\", "[", "]"})
+ESCAPE_GLOB_TABLE = {ord(char): "\\" + char for char in GLOBCHARS}
+SNIFF_SIZE = 2048
+HEAD_SIZE = 4096
+DECLARED_OWNER_MARKER = b"codeowner:"
+# Codeowner comment format allows for different single line comment prefixes:
+#     # codeowner: @alice        // codeowner: @bob        -- codeowner: @team
+DECLARED_OWNER_RE = re.compile(
+    rb"^[ \t]*[^\w\s]{1,4}[ \t]*codeowner:[ \t]*(?P<owners>[^\r\n]*)\r?$",
+    re.MULTILINE,
+)
+BLAME_HEADER_TAIL_FIELDS = 3
+BLAME_OID_LENGTHS = frozenset({40, 64})
+BLAME_AUTHOR_MAIL = "author-mail"
+BLAME_HEX_DIGITS = "0123456789abcdef"
 USER_ID_MAP_SCHEMA = {
     "type": "object",
     "patternProperties": {
@@ -31,6 +42,31 @@ USER_ID_MAP_SCHEMA = {
 }
 
 
+class OwnerRules(NamedTuple):
+    """How blamed lines are turned into owners.
+
+    Attributes:
+        relevance (float): Percentage of the largest contribution that a
+            contributor must reach to own the file.
+        user_id_map (Dict[str, str]): Mapping of committer emails to user ids.
+    """
+
+    relevance: float
+    user_id_map: Dict[str, str]
+
+
+def decode(raw: bytes) -> str:
+    """Decode git output, replacing anything that is not valid UTF-8.
+
+    Args:
+        raw (bytes): Raw bytes from git.
+
+    Returns:
+        str: Decoded string.
+    """
+    return raw.decode(encoding="utf-8", errors="replace")
+
+
 def escape_glob(input: str) -> str:
     """Escape glob special characters in string.
 
@@ -40,125 +76,159 @@ def escape_glob(input: str) -> str:
     Returns:
         str: Escaped string.
     """
-    escaped_str = ""
-    for char in input:
-        if char in GLOBCHARS:
-            escaped_str += "\\" + char
-        else:
-            escaped_str += char
-    return escaped_str
+    return input.translate(ESCAPE_GLOB_TABLE)
 
 
-def unescape_glob(input: str) -> str:
-    """Unescape glob special characters in string.
+def read_head(file: Path) -> bytes:
+    """Read the start of a file, in one read.
+
+    Enough both to classify the file and to hold a declared owners block, so
+    neither costs a read of its own.
 
     Args:
-        input (str): Input string.
+        file (Path): File to read.
 
     Returns:
-        _type_: Unescaped string.
-    """
-    unescaped_str = ""
-    input_length = len(input)
-    i = 0
-
-    while i < input_length:
-        char = input[i]
-        if char == "\\" and i + 1 < input_length and input[i + 1] in GLOBCHARS:
-            unescaped_str += input[i + 1]
-            i += 2
-            continue
-        unescaped_str += char
-        i += 1
-    return unescaped_str
-
-
-def is_binary_file(file: Path) -> bool:
-    """Check if file is binary.
-
-    Args:
-        file (Path): File to check.
-
-    Returns:
-        bool: Is the file binary.
+        bytes: Leading bytes of the file.
     """
     with file.open("rb") as f:
-        data = f.read(2048)
-        return bool(data.translate(None, TEXTCHARS))
+        return f.read(HEAD_SIZE)
 
 
-def is_empty(file: Path) -> bool:
-    """Check if file is empty.
+def sniff_head(head: bytes) -> Tuple[bool, bool]:
+    """Check whether a file is empty and whether it is binary.
 
     Args:
-        file (Path): File to check.
+        head (bytes): Leading bytes of the file.
 
     Returns:
-        bool: Is the file empty.
+        Tuple[bool, bool]: Is the file empty, is the file binary.
     """
-    return file.stat().st_size == 0
+    sample = head[:SNIFF_SIZE]
+
+    return (not sample, bool(sample.translate(None, TEXTCHARS)))
+
+
+def parse_declared_owners(head: bytes) -> Set[str]:
+    """Read the owners a file declares for itself.
+
+    Every `codeowner:` line in the head counts, so owners may be listed one per
+    line or several to a line. They are taken verbatim: declaring them is how a
+    file overrides what its history says, so they do not go through the user id
+    map.
+
+    Args:
+        head (bytes): Leading bytes of the file.
+
+    Returns:
+        Set[str]: Declared owners, empty if the file declares none.
+    """
+    # Cheap reject first, so files declaring nothing never reach the regex.
+    if DECLARED_OWNER_MARKER not in head:
+        return set()
+
+    owners: Set[str] = set()
+
+    for match in DECLARED_OWNER_RE.finditer(head):
+        for token in decode(match.group("owners")).split():
+            # Drops a trailing comment terminator such as `*/` or `-->`, which
+            # no owner can look like.
+            if any(character.isalnum() for character in token):
+                owners.add(token)
+
+    return owners
+
+
+def decode_paths(raw: bytes) -> Set[Path]:
+    """Split NUL-delimited git output into paths.
+
+    Args:
+        raw (bytes): NUL-delimited output.
+
+    Returns:
+        Set[Path]: Paths it named.
+    """
+    return {Path(decode(item)) for item in raw.split(b"\x00") if item}
+
+
+def get_git_files() -> Set[Path]:
+    """Get every file tracked in the working tree.
+
+    Listed with `-z`, so a path outside ASCII arrives as git stored it rather
+    than in the escaped form git quotes for terminals.
+
+    Raises:
+        CalledProcessError: Git command failed.
+
+    Returns:
+        Set[Path]: Tracked files.
+    """
+    files_output = subprocess.run(
+        ["git", "ls-files", "-z"],
+        capture_output=True,
+        check=True,
+    )
+
+    return decode_paths(files_output.stdout)
+
+
+def get_cpu_count() -> int:
+    """Get how many CPUs this process may use.
+
+    `os.process_cpu_count` honours CPU affinity, which matters under `taskset`
+    or in a container, but it only exists from Python 3.13.
+
+    Returns:
+        int: Usable CPU count, at least one.
+    """
+    count = getattr(os, "process_cpu_count", os.cpu_count)()
+
+    return count or 1
 
 
 def get_git_root() -> Path:
     """Get git root directory.
 
-    Raises:
-        CommandError: Git command failed.
-
     Returns:
         Path: Git root directory path.
     """
-    try:
-        rev_parse_output = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            text=True,
-            universal_newlines=True,
-            capture_output=True,
-            check=True,
-        )
-        git_root = Path(rev_parse_output.stdout.strip())
-    except CalledProcessError as e:
-        stderr: str = e.stderr.decode(encoding="utf-8")
-        stderr = json.dumps(stderr.strip())
-        raise CommandError(stderr) from e
-    else:
-        return git_root
+    rev_parse_output = subprocess.run(
+        ("git", "rev-parse", "--show-toplevel"),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    git_root = Path(rev_parse_output.stdout.strip())
+
+    return git_root
 
 
-def get_git_staged_files() -> Set[Path]:
-    """Get all staged files.
+def create_worktree_commit(author_email: str) -> str:
+    """Snapshot the index and working tree as a dangling commit object.
 
-    Raises:
-        CommandError: Git command failed.
+    Args:
+        author_email (str): Email to attribute uncommitted lines to.
+
 
     Returns:
-        Set[Path]: Staged files.
+        str: Hash of the snapshot, or "HEAD" when the tree is clean and git
+            therefore has nothing to snapshot.
     """
-    try:
-        files_output = subprocess.run(
-            [
-                "git",
-                "ls-files",
-                "-z",
-                "--deduplicate",
-                "--empty-directory",
-                "--full-name",
-            ],
-            capture_output=True,
-            check=True,
-        )
-        items = files_output.stdout.split(b"\x00")
-        compact_items = [ i for i in items if bool(i) ]
-        result: set[Path] = set()
-        for item in compact_items:
-            path = item.decode(encoding="utf-8")
-            result.add(Path(path))
-    except CalledProcessError as e:
-        stderr: str = e.stderr.decode(encoding="utf-8")
-        stderr = json.dumps(stderr.strip())
-        raise CommandError(stderr) from e
-    else:
-        return result
+    stash_output = subprocess.run(
+        ("git", "stash", "create"),
+        env={
+            **os.environ,
+            "GIT_AUTHOR_NAME": "codeowners",
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_COMMITTER_NAME": "codeowners",
+            "GIT_COMMITTER_EMAIL": author_email,
+        },
+        capture_output=True,
+        check=True,
+        text=True
+    )
+
+    return stash_output.stdout.strip() or "HEAD"
 
 
 def validate_user_map(user_map: Dict[str, str]) -> None:
@@ -178,143 +248,201 @@ def get_git_email() -> str:
 
     Raises:
         GitEmailEmptyError: Email is an empty string.
-        CommandError: Git command failed.
 
     Returns:
         str: Email
     """
-    try:
-        config_output = subprocess.run(
-            ["git", "config", "user.email"],
-            text=True,
-            universal_newlines=True,
-            capture_output=True,
-            check=True,
-        )
-        email = config_output.stdout.strip()
-        if not email:
-            raise GitEmailEmptyError()
-    except CalledProcessError as e:
-        stderr: str = e.stderr
-        stderr = json.dumps(stderr.strip())
-        raise CommandError(stderr) from e
-    else:
-        return email
+    config_output = subprocess.run(
+        ("git", "config", "user.email"),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    email = config_output.stdout.strip()
+    if not email:
+        raise GitEmailEmptyError()
+
+    return email
 
 
-def get_git_owners(
-    file: Path,
-    default_email: str,
-    threshold: float,
-    user_id_map: Dict[str, str],
-) -> Set[str]:
-    """Calculate owners of file based on git annotate output.
+def is_blame_oid(field: str) -> bool:
+    """Whether a field is an object id, which is what marks an entry header.
 
     Args:
-        file (Path): Target file.
-        default_email (str): Email to replace <not.committed.yet> with.
-        threshold (float): Contribution percentage required for committer to be considered an owner.
+        field (str): Field to test.
+
+    Returns:
+        bool: Whether the field is an object id.
+    """
+    # `strip` leaves anything that is not a hex digit behind, so an empty
+    # result means every character was one.
+    return len(field) in BLAME_OID_LENGTHS and not field.strip(BLAME_HEX_DIGITS)
+
+
+def parse_blame_line_count(header: str) -> int:
+    """Read the line count from the "<orig line> <final line> <count>" of a header.
+
+    All three are required to be numbers: together with the object id they are
+    what identifies a header, so a partial match means the stream is not shaped
+    the way this parser assumes.
+
+    Args:
+        header (str): The entry header, object id included.
+
+    Raises:
+        GitAnnotateError: The header is malformed.
+
+    Returns:
+        int: Number of lines the entry covers.
+    """
+    (_, _, tail) = header.partition(" ")
+    fields = tail.split(" ")
+
+    if len(fields) != BLAME_HEADER_TAIL_FIELDS or not all(
+        field.isdigit() for field in fields
+    ):
+        raise GitAnnotateError(header)
+
+    return int(fields[-1])
+
+
+def parse_blame_author_mail(value: str) -> str:
+    """Read the address out of the value of an "author-mail" line.
+
+    Args:
+        value (str): Value the line carried.
+
+    Returns:
+        str: Author email, stripped of its angle brackets.
+    """
+    return value.strip().strip("<>")
+
+
+def attribute_to_owners(
+    lines_by_sha: Dict[str, int],
+    owner_by_sha: Dict[str, str],
+) -> Dict[str, int]:
+    """Total each owner's blamed lines across the commits they wrote.
+
+    Args:
+        lines_by_sha (Dict[str, int]): Lines blamed on each commit.
+        owner_by_sha (Dict[str, str]): Owner of each commit.
+
+    Raises:
+        GitAuthorMissingError: A commit was blamed but never given an author.
+
+    Returns:
+        Dict[str, int]: Lines attributed per owner.
+    """
+    contributions: Dict[str, int] = defaultdict(int)
+
+    for sha, lines in lines_by_sha.items():
+        owner = owner_by_sha.get(sha)
+        if not owner:
+            raise GitAuthorMissingError(sha)
+        contributions[owner] += lines
+
+    return contributions
+
+
+def parse_blame(
+    lines: Iterable[str],
+    user_id_map: Dict[str, str],
+) -> Tuple[Dict[str, int], int]:
+    """Count blamed lines per owner in `git blame --incremental` output.
+
+    Args:
+        lines (Iterable[str]): Lines of `git blame --incremental` output. Read
+            straight off the pipe, so a trailing newline on each is expected,
+            but a list of bare lines parses the same.
         user_id_map (Dict[str, str]): Mapping of committer emails to user ids.
 
     Raises:
-        GitAnnotateError: Failed to parse annotate output.
-        CommandError: Git command failed.
+        GitAnnotateError: Failed to parse blame output.
+        GitAuthorMissingError: A blamed commit had no author.
+
+    Returns:
+        Tuple[Dict[str, int], int]: Lines attributed per owner and total lines.
+    """
+    lines_by_sha: Dict[str, int] = defaultdict(int)
+    owner_by_sha: Dict[str, str] = {}
+    lines_total = 0
+
+    sha = ""
+
+    for raw_line in lines:
+        line = raw_line.rstrip("\n")
+        (key, _, value) = line.partition(" ")
+
+        if is_blame_oid(key):
+            sha = key
+            entry_lines = parse_blame_line_count(line)
+            lines_by_sha[sha] += entry_lines
+            lines_total += entry_lines
+        elif key == BLAME_AUTHOR_MAIL:
+            email = parse_blame_author_mail(value)
+            owner_by_sha[sha] = user_id_map.get(email, email)
+
+    return (attribute_to_owners(lines_by_sha, owner_by_sha), lines_total)
+
+
+def take_owners(contributions: Dict[str, int], relevance: float) -> Set[str]:
+    """Take everyone who wrote a comparable share of a file to its main author.
+
+    Measuring each contributor against the largest one keeps the comparison
+    between people rather than against the file: a quarter of a file earns
+    ownership beside another quarter, and does not beside three quarters. The
+    largest contributor always qualifies, so a blamed file always has an owner.
+
+    Args:
+        contributions (Dict[str, int]): Lines attributed per owner.
+        relevance (float): Percentage of the largest contribution a contributor
+            must reach to own the file.
+
+    Returns:
+        Set[str]: File owners, empty only when nothing was blamed.
+    """
+    if not contributions:
+        return set()
+
+    largest = max(contributions.values())
+
+    return {
+        owner
+        for owner, lines in contributions.items()
+        if (lines * 100) / largest >= relevance
+    }
+
+
+def get_git_owners(file: Path, rules: OwnerRules, revision: str) -> Set[str]:
+    """Calculate owners of file based on git blame output.
+
+    Args:
+        file (Path): Target file.
+        rules (OwnerRules): How to turn blamed lines into owners.
+        revision (str): Revision to blame.
+
+    Raises:
+        GitAnnotateError: Failed to parse blame output.
+        GitAuthorMissingError: A blamed commit had no author.
+        CalledProcessError: Git command failed.
 
     Returns:
         Set[str]: File owners.
     """
-    try:
-        annotate_output = subprocess.run(
-            ["git", "annotate", "-e", str(file)],
-            text=True,
-            universal_newlines=True,
-            capture_output=True,
-            check=True,
-        )
-    except CalledProcessError as e:
-        stderr: str = e.stderr
-        stderr = json.dumps(stderr.strip())
-        raise CommandError(stderr) from e
+    with subprocess.Popen(
+        ("git", "blame", "--incremental", revision, "--", str(file)),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        encoding="utf-8",
+        errors="replace",
+    ) as process:
+        (contributions, _) = parse_blame(process.stdout, rules.user_id_map)
 
-    contributions: Dict[str, int] = defaultdict(int)
-    lines_total = 0
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, process.args)
 
-    for line in annotate_output.stdout.splitlines():
-        match = EMAIL_RE.match(line)
-        if match is None:
-            raise GitAnnotateError()
-
-        email = match.group(1)
-        contributions[email] += 1
-        lines_total += 1
-
-    owners: Set[str] = set()
-
-    for committer_email, lines in contributions.items():
-        email = committer_email
-
-        if email == "not.committed.yet":
-            email = default_email
-
-        if email in user_id_map:
-            email = user_id_map[email]
-
-        percent = (lines * 100) / lines_total
-        if percent > threshold:
-            owners.add(email)
-
-    return owners
-
-
-def parse_codeowners(
-    codeowners: TextIO,
-) -> Tuple[Dict[Path, Set[str]], Set[Path]]:
-    """Parse codeowners file into a dict.
-
-    Args:
-        codeowners (TextIO): Codeowners IO stream.
-        workdir (Path): Parse root directory.
-
-    Raises:
-        SectionsNotSupportedError: Encountered section.
-        MissingOwnersError: No owner provided for file.
-
-    Returns:
-        Tuple[Dict[Path, Set[str]], Set[Path]]: Map of files to owners and a set of merge conflict files.
-    """
-    line_number = 0
-    conflict_files: Set[Path] = set()
-    owners_mapping: Dict[Path, Set[str]] = {}
-
-    while True:
-        line = codeowners.readline()
-        line_number += 1
-        if not line:
-            break
-
-        tokens = line.split()
-
-        if (
-            not tokens
-            or tokens[0].startswith("#")
-            or tokens[0] in ["<<<<<<<", "=======", ">>>>>>>"]
-        ):
-            continue
-        elif tokens[0].startswith("["):
-            raise SectionsNotSupportedError(line_number)
-        elif len(tokens) < 2:
-            raise MissingOwnersError(line_number)
-
-        (path, owners) = (unescape_glob(tokens[0]), set(tokens[1:]))
-        file = Path(path)
-
-        if owners_mapping.get(file):
-            conflict_files.add(file)
-        else:
-            owners_mapping[file] = owners
-
-    return (owners_mapping, conflict_files)
-
+    return take_owners(contributions, rules.relevance)
 
 def dump_codeowners(codeowners: TextIO, owners_mapping: Dict[Path, Set[str]]) -> None:
     """Dump codeowners rules to a file.
@@ -324,58 +452,61 @@ def dump_codeowners(codeowners: TextIO, owners_mapping: Dict[Path, Set[str]]) ->
         owners_mapping (Dict[str, Set[str]]): Map of file paths to owners.
 
     """
-    codeowners.write(
-        "#####################################################################\n"
-        "# This file is generated by pre-commit. Do not edit it manually.    #\n"
-        "# Leave merge conflicts as is. They will be resolved by pre-commit. #\n"
-        "#####################################################################\n\n"
-    )
+    posix_owners_mapping = {k.as_posix(): v for k, v in owners_mapping.items()}
 
-    posix_owners_mapping = {str(k.as_posix()): v for k, v in owners_mapping.items()}
+    rules = [
+        escape_glob(file) + " " + " ".join(sorted(posix_owners_mapping[file]))
+        for file in sorted(posix_owners_mapping)
+    ]
 
-    for file in sorted(posix_owners_mapping.keys()):
-        codeowners.write(
-            escape_glob(file)
-            + " "
-            + " ".join(sorted(posix_owners_mapping[file]))
-            + "\n"
-        )
+    if rules:
+        codeowners.write("\n\n".join(rules) + "\n")
 
 
-def update_owners_mapping(  # noqa: PLR0913
-    owners_mapping: Dict[Path, Set[str]],
+def generate_owners_mapping(
     files: Set[Path],
     codeowners_file: Path,
     default_email: str,
-    threshold: float,
-    user_id_map: Dict[str, str],
+    rules: OwnerRules,
+    jobs: int,
 ) -> Dict[Path, Set[str]]:
-    """Update file entries in owners mapping.
+    """Map each file to its owners.
+
+    A file that declares owners in a header block is taken at its word; the
+    rest are blamed.
 
     Args:
-        owners_mapping (Dict[Path, Set[str]]): Source map of file paths to owners.
-        files (List[Path]): Files to update.
-        codeowners_file (Path): Codeowners file to exclude from update.
-        default_email (str): Email to replace <not.committed.yet> with.
-        threshold (float): Contribution percentage required for committer to be considered an owner.
-        user_id_map (Dict[str, str]): Mapping of committer emails to user ids.
+        files (Set[Path]): Files to generate owners for.
+        codeowners_file (Path): Codeowners file to exclude from the result.
+        default_email (str): Email to attribute uncommitted lines to.
+        rules (OwnerRules): How to turn blamed lines into owners.
+        jobs (int): Number of blames to run concurrently.
 
     Raises:
-        GitAnnotateError: Failed to parse annotate output.
-        CommandError: Git command failed.
+        GitAnnotateError: Failed to parse blame output.
+        GitAuthorMissingError: A blamed commit had no author.
 
     Returns:
         Dict[Path, Set[str]]: Map of files to owners.
     """
-    result: Dict[Path, Set[str]] = owners_mapping.copy()
-    for file in files:
-        owners = set()
-        if not (file == codeowners_file or is_empty(file) or is_binary_file(file)):
-            owners = get_git_owners(file, default_email, threshold, user_id_map)
+    revision = create_worktree_commit(default_email)
 
-        if owners:
-            result[file] = owners
-        elif result.get(file):
-            del result[file]
+    def resolve(file: Path) -> Tuple[Path, Set[str]]:
+        if file == codeowners_file:
+            return (file, set())
 
-    return result
+        head = read_head(file)
+        (empty, binary) = sniff_head(head)
+        if empty or binary:
+            return (file, set())
+
+        declared = parse_declared_owners(head)
+        if declared:
+            return (file, declared)
+
+        return (file, get_git_owners(file, rules, revision))
+
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        return {
+            file: owners for (file, owners) in executor.map(resolve, files) if owners
+        }

@@ -7,7 +7,7 @@ Add this to your `.pre-commit-config.yaml`
 
 ```yaml
 - repo: https://github.com/c0m1c5an5/codeowners-pre-commit.git
-  rev: 1.0.0
+  rev: 2.0.1
   hooks:
     - id: codeowners
 ```
