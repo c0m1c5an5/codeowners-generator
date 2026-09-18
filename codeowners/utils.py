@@ -18,6 +18,8 @@ TEXTCHARS = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7
 GLOBCHARS = frozenset({" ", "*", "!", "\\", "[", "]"})
 ESCAPE_GLOB_TABLE = {ord(char): "\\" + char for char in GLOBCHARS}
 SNIFF_SIZE = 2048
+MINIMUM_RULE_TOKENS = 2
+RULE_FIELDS_RE = re.compile(r"(?<!\\)\s+")
 HEAD_SIZE = 4096
 DECLARED_OWNER_MARKER = b"codeowner:"
 # Codeowner comment format allows for different single line comment prefixes:
@@ -444,6 +446,43 @@ def get_git_owners(file: Path, rules: OwnerRules, revision: str) -> Set[str]:
 
     return take_owners(contributions, rules.relevance)
 
+def render_codeowners(owners_mapping: Dict[Path, Set[str]]) -> Dict[str, Set[str]]:
+    """Render an owners mapping as codeowners line format.
+
+    Args:
+        owners_mapping (Dict[Path, Set[str]]): Map of files to owners.
+
+    Returns:
+        Dict[str, Set[str]]: Owners stated per path.
+    """
+    return {
+        escape_glob(file.as_posix()): owners
+        for file, owners in owners_mapping.items()
+    }
+
+
+def parse_codeowners(codeowners: TextIO) -> Dict[str, Set[str]]:
+    """Parse lines from a codeowners file.
+
+    Args:
+        codeowners (TextIO): Codeowners IO stream.
+
+    Returns:
+        Dict[str, Set[str]]: Owners stated per path.
+    """
+    rules: Dict[str, Set[str]] = {}
+
+    for line in codeowners:
+        tokens = [field for field in RULE_FIELDS_RE.split(line.strip()) if field]
+
+        if len(tokens) < MINIMUM_RULE_TOKENS or tokens[0].startswith(("#", "[")):
+            continue
+
+        rules[tokens[0]] = set(tokens[1:])
+
+    return rules
+
+
 def dump_codeowners(codeowners: TextIO, owners_mapping: Dict[Path, Set[str]]) -> None:
     """Dump codeowners rules to a file.
 
@@ -452,11 +491,10 @@ def dump_codeowners(codeowners: TextIO, owners_mapping: Dict[Path, Set[str]]) ->
         owners_mapping (Dict[str, Set[str]]): Map of file paths to owners.
 
     """
-    posix_owners_mapping = {k.as_posix(): v for k, v in owners_mapping.items()}
+    rendered = render_codeowners(owners_mapping)
 
     rules = [
-        escape_glob(file) + " " + " ".join(sorted(posix_owners_mapping[file]))
-        for file in sorted(posix_owners_mapping)
+        " ".join((path, *sorted(rendered[path]))) for path in sorted(rendered)
     ]
 
     if rules:

@@ -14,12 +14,16 @@ from codeowners.utils import (
     get_git_email,
     get_git_files,
     get_git_root,
+    parse_codeowners,
+    render_codeowners,
     validate_user_map,
 )
 
 logging.basicConfig(format="%(levelname)s: %(filename)s:%(lineno)d %(message)s")
 logger = logging.getLogger(__name__)
 VERBOSITY = (logging.WARNING, logging.INFO, logging.DEBUG)
+PRESERVE_VARIABLE = "CODEOWNERS_PRESERVE"
+PRESERVE_ON = frozenset({"1", "yes", "true", "True"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +50,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="path to codeowners file",
     )
     parser.add_argument(
+        "-p",
+        "--preserve",
+        action="store_true",
+        default=os.environ.get(PRESERVE_VARIABLE) in PRESERVE_ON,
+        help=(
+            f"leave the codeowners file untouched when equivalent (env:{PRESERVE_VARIABLE})"
+        ),
+    )
+    parser.add_argument(
+        "-r",
         "--relevance",
         type=float,
         default=65.0,
@@ -81,6 +95,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def equivalent_codeowners(
+    codeowners_file: Path,
+    owners_mapping: Dict[Path, Set[str]],
+) -> bool:
+    """Whether the file already states exactly these owners.
+
+    Args:
+        codeowners_file (Path): File to read.
+        owners_mapping (Dict[Path, Set[str]]): Map of files to owners.
+
+    Returns:
+        bool: Whether rewriting the file would leave its rules unchanged.
+    """
+    if not codeowners_file.is_file():
+        return False
+
+    with codeowners_file.open("r") as codeowners_in_stream:
+        return parse_codeowners(codeowners_in_stream) == render_codeowners(
+            owners_mapping
+        )
 
 
 def load_user_map(user_map_file: Path) -> Dict[str, str]:
@@ -157,6 +193,10 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
         owners_mapping = {
             file: owners | admins for file, owners in owners_mapping.items()
         }
+
+    if args.preserve and equivalent_codeowners(codeowners_file, owners_mapping):
+        logger.info("Left '%s' as it already states these owners", codeowners_file)
+        return 0
 
     write_codeowners(codeowners_file, owners_mapping)
     logger.info("Wrote %s rules to '%s'", len(owners_mapping), codeowners_file)
