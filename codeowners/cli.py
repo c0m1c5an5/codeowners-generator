@@ -1,23 +1,16 @@
+"""Command line entry point: the outermost shell."""
+
 import argparse
-import json
 import logging
 import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Set
 
-from codeowners.utils import (
-    OwnerRules,
-    dump_codeowners,
-    generate_owners_mapping,
-    get_cpu_count,
-    get_git_email,
-    get_git_files,
-    get_git_root,
-    parse_codeowners,
-    render_codeowners,
-    validate_user_map,
-)
+from codeowners.core.blame import OwnerRules
+from codeowners.shell.fs import load_user_map, states_owners, write_codeowners
+from codeowners.shell.git import get_git_email, get_git_files, get_git_root
+from codeowners.shell.owners import generate_owners_mapping, get_cpu_count
 
 logging.basicConfig(format="%(levelname)s: %(filename)s:%(lineno)d %(message)s")
 logger = logging.getLogger(__name__)
@@ -55,7 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=os.environ.get(PRESERVE_VARIABLE) in PRESERVE_ON,
         help=(
-            f"leave the codeowners file untouched when equivalent (env:{PRESERVE_VARIABLE})"
+            "leave the codeowners file untouched when equivalent "
+            f"(env:{PRESERVE_VARIABLE})"
         ),
     )
     parser.add_argument(
@@ -95,59 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
-
-
-def equivalent_codeowners(
-    codeowners_file: Path,
-    owners_mapping: Dict[Path, Set[str]],
-) -> bool:
-    """Whether the file already states exactly these owners.
-
-    Args:
-        codeowners_file (Path): File to read.
-        owners_mapping (Dict[Path, Set[str]]): Map of files to owners.
-
-    Returns:
-        bool: Whether rewriting the file would leave its rules unchanged.
-    """
-    if not codeowners_file.is_file():
-        return False
-
-    with codeowners_file.open("r") as codeowners_in_stream:
-        return parse_codeowners(codeowners_in_stream) == render_codeowners(
-            owners_mapping
-        )
-
-
-def load_user_map(user_map_file: Path) -> Dict[str, str]:
-    """Read and validate a committer email to user id map.
-
-    Args:
-        user_map_file (Path): File to read.
-
-    Returns:
-        Dict[str, str]: Mapping of committer emails to user ids.
-    """
-    with user_map_file.open("r") as user_map_stream:
-        user_id_map: Dict[str, str] = json.load(user_map_stream)
-
-    validate_user_map(user_id_map)
-
-    return user_id_map
-
-
-def write_codeowners(
-    codeowners_file: Path,
-    owners_mapping: Dict[Path, Set[str]],
-) -> None:
-    """Write the owners mapping out as a codeowners file.
-
-    Args:
-        codeowners_file (Path): File to write.
-        owners_mapping (Dict[Path, Set[str]]): Map of files to owners.
-    """
-    with codeowners_file.open("w") as codeowners_out_stream:
-        dump_codeowners(codeowners_out_stream, owners_mapping)
 
 
 def cli(argv: List[str] = sys.argv[1:]) -> int:
@@ -194,7 +135,7 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
             file: owners | admins for file, owners in owners_mapping.items()
         }
 
-    if args.preserve and equivalent_codeowners(codeowners_file, owners_mapping):
+    if args.preserve and states_owners(codeowners_file, owners_mapping):
         logger.info("Left '%s' as it already states these owners", codeowners_file)
         return 0
 

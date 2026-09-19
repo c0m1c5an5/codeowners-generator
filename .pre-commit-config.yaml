@@ -1,38 +1,64 @@
 default_install_hook_types: ["pre-commit", "commit-msg"]
+.common:
+  uv-version: &uv-version
+    - "uv==0.12.17"
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
     hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-merge-conflict
+        args: ["--assume-in-merge"]
       - id: end-of-file-fixer
+        alias: format-end-of-line
+      - id: fix-byte-order-marker
+      - id: check-json
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 17a6b18b8006d390e476d419631aae885cadfa40  # frozen: 0.12.17
+    hooks:
+      - id: uv-lock
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 2eeb5678de71a00c0902cbda7105d328432f72cb  # frozen: v0.16.8
+    hooks:
+      - id: ruff-check
+      - id: ruff
+        name: Sort imports with ruff
+        alias: format-ruff-isort
+        args: ["--select", "I", "--fix"]
+      - id: ruff-format
+        alias: format-ruff
   - repo: local
     hooks:
       - id: mypy
         name: mypy
-        entry: scripts/mypy.sh
-        language: system
-        types_or: [python, pyi]
+        language: python
+        entry: uv
+        args:
+          - run
+          - --locked
+          - --isolated
+          - mypy
+          - --strict
+          - .
+        types: ["python"]
         pass_filenames: false
-  - repo: https://github.com/pycqa/isort
-    rev: 5.12.0
-    hooks:
-      - id: isort
-  - repo: https://github.com/psf/black
-    rev: 23.11.0
-    hooks:
-      - id: black
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.1.5
-    hooks:
-      - id: ruff
-  - repo: local
-    hooks:
-      - id: pipenv-requirements
-        name: pipenv-requirements
-        files: Pipfile\.lock
-        language: system
+        additional_dependencies: *uv-version
+      - id: lint-imports
+        name: lint-imports
+        language: python
         pass_filenames: false
-        entry: sh -c 'pipenv requirements | grep -vF --regex="-i https://pypi.org/simple" >| requirements.txt'
+        entry: uv
+        args:
+          - run
+          - --locked
+          - --isolated
+          - lint-imports
+        types: ["python"]
+        additional_dependencies: *uv-version
   - repo: https://github.com/jorisroovers/gitlint
-    rev: v0.19.1
+    rev: acc9d9de6369b76d22cb4167029d2035e8730b98  # frozen: v0.19.1
     hooks:
       - id: gitlint

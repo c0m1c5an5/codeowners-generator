@@ -24,7 +24,7 @@ dependencies = [
 codeowners = "codeowners.__main__:main"
 
 [tool.setuptools]
-packages = ["codeowners"]
+packages = ["codeowners", "codeowners.core", "codeowners.shell"]
 
 [tool.isort]
 profile = "black"
@@ -58,4 +58,54 @@ ignore = [
     "D107",    # Missing docstring in `__init__`
     "S603",    # `subprocess` call: check for execution of untrusted input
     "S607",    # Starting a process with a partial executable path
+]
+
+[dependency-groups]
+dev = [
+    "import-linter",
+    "mypy>=1.19.1",
+    "types-jsonschema>=4.26.0.20260202",
+]
+
+[tool.importlinter]
+root_package = "codeowners"
+# Needed so the contracts below can name modules outside this package.
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Functional core, imperative shell"
+type = "layers"
+layers = [
+    "codeowners.__main__",
+    "codeowners.cli",
+    "codeowners.shell",
+    "codeowners.core",
+    "codeowners.exceptions",
+]
+
+[[tool.importlinter.contracts]]
+name = "Core is pure"
+type = "forbidden"
+source_modules = ["codeowners.core"]
+# Effects and nondeterminism, which a core function must be handed the result
+# of rather than reach for itself.
+forbidden_modules = [
+    "argparse",
+    "concurrent",
+    "datetime",
+    "http",
+    "io",
+    "logging",
+    "multiprocessing",
+    "os",
+    "random",
+    "secrets",
+    "shutil",
+    "socket",
+    "subprocess",
+    "sys",
+    "tempfile",
+    "threading",
+    "time",
+    "urllib",
 ]
