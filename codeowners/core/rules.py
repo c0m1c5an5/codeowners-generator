@@ -4,22 +4,52 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, Set
 
-GLOBCHARS = frozenset({" ", "*", "!", "\\", "[", "]"})
-ESCAPE_GLOB_TABLE = {ord(char): "\\" + char for char in GLOBCHARS}
 MINIMUM_RULE_TOKENS = 2
-RULE_FIELDS_RE = re.compile(r"(?<!\\)\s+")
+# What a path has to be escaped against: the whitespace that separates the
+# fields of a rule, the characters a path is glob matched with, and the
+# backslash that escapes any of them. Written as a class rather than a table so
+# that it stays the same `\s` the fields below are found with.
+PATH_ESCAPE_RE = re.compile(r"([\s\\*!\[\]])")
+# An owner is never matched as a glob, so only the separator has to be escaped.
+OWNER_ESCAPE_RE = re.compile(r"([\s\\])")
+# One field of a rule: escaped pairs, and anything that is neither a separator
+# nor an escape. Reading a pair whole is what keeps an escaped backslash at the
+# end of a path from escaping the space that follows it.
+RULE_FIELD_RE = re.compile(r"(?:\\.|[^\s\\])+")
+# A leading `#` opens a comment and a leading `[` a section, so a rule states
+# neither.
+RULE_PREFIXES_IGNORED = ("#", "[")
 
 
-def escape_glob(input: str) -> str:
-    """Escape glob special characters in string.
+def escape_path(file: str) -> str:
+    """Escape a path so that it is read back as the one file it names.
 
     Args:
-        input (str): Input string.
+        file (str): Path to escape.
 
     Returns:
-        str: Escaped string.
+        str: Escaped path.
     """
-    return input.translate(ESCAPE_GLOB_TABLE)
+    escaped = PATH_ESCAPE_RE.sub(r"\\\1", file)
+
+    # `#` means a comment only where a rule would start, so it is escaped only
+    # there, leaving a path such as `C#/Program.cs` as it is written elsewhere.
+    if escaped.startswith("#"):
+        return "\\" + escaped
+
+    return escaped
+
+
+def escape_owner(owner: str) -> str:
+    """Escape an owner so that it is read back as the one owner it names.
+
+    Args:
+        owner (str): Owner to escape.
+
+    Returns:
+        str: Escaped owner.
+    """
+    return OWNER_ESCAPE_RE.sub(r"\\\1", owner)
 
 
 def render_codeowners(owners_mapping: Dict[Path, Set[str]]) -> Dict[str, Set[str]]:
@@ -29,15 +59,19 @@ def render_codeowners(owners_mapping: Dict[Path, Set[str]]) -> Dict[str, Set[str
         owners_mapping (Dict[Path, Set[str]]): Map of files to owners.
 
     Returns:
-        Dict[str, Set[str]]: Owners stated per path.
+        Dict[str, Set[str]]: Owners stated per path, as the file states them.
     """
     return {
-        escape_glob(file.as_posix()): owners for file, owners in owners_mapping.items()
+        escape_path(file.as_posix()): {escape_owner(owner) for owner in owners}
+        for file, owners in owners_mapping.items()
     }
 
 
 def parse_codeowners(lines: Iterable[str]) -> Dict[str, Set[str]]:
     """Parse lines of a codeowners file.
+
+    Fields are left escaped, which is how `render_codeowners` states them, so
+    the two can be compared without either having to guess at the other.
 
     Args:
         lines (Iterable[str]): Lines of the codeowners file.
@@ -48,9 +82,11 @@ def parse_codeowners(lines: Iterable[str]) -> Dict[str, Set[str]]:
     rules: Dict[str, Set[str]] = {}
 
     for line in lines:
-        tokens = [field for field in RULE_FIELDS_RE.split(line.strip()) if field]
+        tokens = RULE_FIELD_RE.findall(line)
 
-        if len(tokens) < MINIMUM_RULE_TOKENS or tokens[0].startswith(("#", "[")):
+        if len(tokens) < MINIMUM_RULE_TOKENS or tokens[0].startswith(
+            RULE_PREFIXES_IGNORED
+        ):
             continue
 
         rules[tokens[0]] = set(tokens[1:])

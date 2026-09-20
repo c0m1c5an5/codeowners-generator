@@ -7,6 +7,7 @@ import jsonschema
 
 USER_ID_MAP_SCHEMA = {
     "type": "object",
+    "additionalProperties": False,
     "patternProperties": {
         r"^[a-zA-Z0-9!#$%&*+=?^_`{|}~().,:;<>@'\"\-\[\]\/\\ ]+$": {
             "type": "string",

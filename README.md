@@ -26,30 +26,7 @@ Example user map file (compatible with .gitownrc):
   "user@example.com": "@example",
   "admin@google.com": "@google"
 }
-```  
-
-### Development
-The package is split into a functional core and an imperative shell:
-
-- `codeowners/core/` — pure functions over values: decoding git output, parsing
-  blame, picking owners, rendering and parsing the CODEOWNERS format. No I/O, no
-  globals, no clock, so the same input always gives the same answer.
-- `codeowners/shell/` — everything with an effect: running git, reading file
-  heads, writing the CODEOWNERS file and the thread pool that drives them. Each
-  function does its effect and hands the bytes or lines it got to the core.
-- `codeowners/cli.py` — argument parsing and the order the effects happen in.
-
-The boundary is enforced rather than just documented. `lint-imports`
-([import-linter](https://github.com/seddonym/import-linter)) builds the real
-import graph and checks two contracts declared in `pyproject.toml`:
-
-- **Functional core, imperative shell** — a layers contract: `cli` may import
-  `shell`, `shell` may import `core`, and nothing points back up.
-- **Core is pure** — a forbidden contract: nothing under `codeowners.core` may
-  reach `subprocess`, `os`, `logging`, `time` and friends, whether directly or
-  through something it imports.
-
-Run it with `uv run lint-imports`, or let `pre-commit` run it.
+```
 
 # Issues and proposals
 Feel free to create an issue, report a bug or suggest improvements in the "Issues" section.
