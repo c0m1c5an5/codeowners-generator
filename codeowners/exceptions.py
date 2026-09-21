@@ -4,7 +4,7 @@ class Error(Exception):
 
 class GitEmailEmptyError(Error):
     def __init__(self) -> None:
-        message = "Email string is empty"
+        message = "Git email string is empty"
         super().__init__(message)
 
 

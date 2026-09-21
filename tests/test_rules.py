@@ -6,6 +6,7 @@ from typing import Dict, Set
 import pytest
 
 from codeowners.core.rules import (
+    can_be_stated,
     equivalent_codeowners,
     escape_owner,
     escape_path,
@@ -62,6 +63,27 @@ def test_a_path_is_escaped_against_what_the_format_reserves(
 def test_an_owner_is_escaped_against_the_separator(owner: str, expected: str) -> None:
     """An owner is never matched as a glob, so only the separator is escaped."""
     assert escape_owner(owner) == expected
+
+
+@pytest.mark.parametrize(
+    ("file", "statable"),
+    [
+        pytest.param("src/main.py", True, id="ordinary"),
+        pytest.param("a file.txt", True, id="space"),
+        pytest.param("two  spaces.txt", True, id="several-spaces"),
+        pytest.param(" leading.txt", True, id="leading-space"),
+        pytest.param("a\tb.txt", True, id="tab"),
+        pytest.param(f"a{NBSP}b.txt", True, id="non-breaking-space"),
+        pytest.param("new\nline.txt", False, id="newline"),
+        pytest.param("carriage\rreturn.txt", False, id="carriage-return"),
+        pytest.param("vertical\vtab.txt", False, id="vertical-tab"),
+        pytest.param("form\ffeed.txt", False, id="form-feed"),
+        pytest.param("line\u2028separator.txt", False, id="line-separator"),
+    ],
+)
+def test_whether_a_rule_can_be_written_for_a_file(file: str, statable: bool) -> None:
+    """A rule is one line, so a name holding a line break cannot be stated."""
+    assert can_be_stated(Path(file)) == statable
 
 
 ROUND_TRIP_CASES = [

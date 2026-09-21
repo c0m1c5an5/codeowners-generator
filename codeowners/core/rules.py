@@ -52,6 +52,25 @@ def escape_owner(owner: str) -> str:
     return OWNER_ESCAPE_RE.sub(r"\\\1", owner)
 
 
+def can_be_stated(file: Path) -> bool:
+    """Check whether a rule can be written for a file at all.
+
+    A rule is one line, and there is no escape for a line break that a reader
+    going line by line would not read as the end of the rule. Git hands such a
+    name over intact, since it delimits its own output with NULs, but nothing
+    can be stated about it here.
+
+    Args:
+        file (Path): File to state a rule for.
+
+    Returns:
+        bool: Whether the path fits on the one line a rule has.
+    """
+    path = file.as_posix()
+
+    return path.splitlines() == [path]
+
+
 def render_codeowners(owners_mapping: Dict[Path, Set[str]]) -> Dict[str, Set[str]]:
     """Render an owners mapping as codeowners line format.
 

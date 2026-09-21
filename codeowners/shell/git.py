@@ -3,10 +3,10 @@
 import os
 import subprocess
 from pathlib import Path
-from typing import Set, TextIO, cast
+from typing import IO, Dict, Set, TextIO, cast
 
 from codeowners.core.blame import OwnerRules, parse_blame, take_owners
-from codeowners.core.content import decode_paths
+from codeowners.core.content import HEAD_SIZE, decode_paths, decode_tree
 from codeowners.exceptions import GitEmailEmptyError
 
 
@@ -31,18 +31,19 @@ def get_git_email() -> str:
     """Get current git user email.
 
     Raises:
-        GitEmailEmptyError: Email is an empty string.
+        GitEmailEmptyError: Git has no user.email configured.
 
     Returns:
-        str: Email
+        str: Email.
     """
     config_output = subprocess.run(
         ("git", "config", "user.email"),
         text=True,
         capture_output=True,
-        check=True,
+        check=False,
     )
     email = config_output.stdout.strip()
+
     if not email:
         raise GitEmailEmptyError()
 
@@ -95,6 +96,87 @@ def create_worktree_commit(author_email: str) -> str:
     )
 
     return stash_output.stdout.strip() or "HEAD"
+
+
+def get_git_tree(revision: str) -> Dict[Path, str]:
+    """Get every path a revision holds, and what kind of entry each one is.
+
+    Args:
+        revision (str): Revision to list.
+
+    Raises:
+        CalledProcessError: Git command failed.
+
+    Returns:
+        Dict[Path, str]: Kind of entry the revision holds at each path.
+    """
+    ls_tree_output = subprocess.run(
+        ("git", "ls-tree", "-r", "-z", revision),
+        capture_output=True,
+        check=True,
+    )
+
+    return decode_tree(ls_tree_output.stdout)
+
+
+def read_stored_head(file: Path, revision: str) -> bytes:
+    """Read the start of a file as git stores it.
+
+    Args:
+        file (Path): Target file.
+        revision (str): Revision to read the file at.
+
+    Raises:
+        CalledProcessError: Git could not read the file.
+
+    Returns:
+        bytes: Leading bytes of the file.
+    """
+    command = ("git", "cat-file", "blob", f"{revision}:{file}")
+
+    with subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        stdout = cast(IO[bytes], process.stdout)
+        head = stdout.read(HEAD_SIZE)
+        stdout.close()
+        error = cast(IO[bytes], process.stderr).read()
+
+    if len(head) < HEAD_SIZE and process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, command, stderr=error)
+
+    return head
+
+
+def get_last_editor(file: Path, rules: OwnerRules, revision: str) -> Set[str]:
+    """Find who last changed a file.
+
+    Args:
+        file (Path): Target file.
+        rules (OwnerRules): How to turn a committer email into an owner.
+        revision (str): Revision to read the history of.
+
+    Raises:
+        CalledProcessError: Git command failed.
+
+    Returns:
+        Set[str]: The owner who changed the file last, empty when git names
+            nobody, as it does for a file with no history behind it.
+    """
+    log_output = subprocess.run(
+        ("git", "log", "-1", "--format=%ae", revision, "--", str(file)),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    email = log_output.stdout.strip()
+
+    if not email:
+        return set()
+
+    return {rules.user_id_map.get(email, email)}
 
 
 def get_git_owners(file: Path, rules: OwnerRules, revision: str) -> Set[str]:

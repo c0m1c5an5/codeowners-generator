@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Set
 
 from codeowners.core.blame import OwnerRules
+from codeowners.core.rules import can_be_stated
 from codeowners.shell.fs import load_user_map, states_owners, write_codeowners
 from codeowners.shell.git import get_git_email, get_git_files, get_git_root
 from codeowners.shell.owners import generate_owners_mapping, get_cpu_count
@@ -122,8 +123,16 @@ def cli(argv: List[str] = sys.argv[1:]) -> int:
             "User map not provided. All owners will appear as committer email."
         )
 
+    files = set(args.files) or get_git_files()
+    statable = {file for file in files if can_be_stated(file)}
+
+    for file in sorted(files - statable):
+        logger.warning(
+            "Left %r out: a rule is one line, and this name holds a line break", file
+        )
+
     owners_mapping = generate_owners_mapping(
-        set(args.files) or get_git_files(),
+        statable,
         codeowners_file,
         get_git_email(),
         OwnerRules(args.relevance, user_id_map),

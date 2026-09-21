@@ -6,9 +6,16 @@ from pathlib import Path
 from typing import Dict, Set, Tuple
 
 from codeowners.core.blame import OwnerRules
-from codeowners.core.content import owners_from_head
-from codeowners.shell.fs import read_head
-from codeowners.shell.git import create_worktree_commit, get_git_owners
+from codeowners.core.content import has_blamable_lines, parse_declared_owners
+from codeowners.shell.git import (
+    create_worktree_commit,
+    get_git_owners,
+    get_git_tree,
+    get_last_editor,
+    read_stored_head,
+)
+
+BLOB = "blob"
 
 
 def get_cpu_count() -> int:
@@ -34,8 +41,9 @@ def generate_owners_mapping(
 ) -> Dict[Path, Set[str]]:
     """Map each file to its owners.
 
-    A file that declares owners in a header block is taken at its word; the
-    rest are blamed.
+    A file that declares owners in a header block is taken at its word, a
+    file whose lines cannot be read is credited to whoever changed it last,
+    and the rest are blamed.
 
     Args:
         files (Set[Path]): Files to generate owners for.
@@ -52,13 +60,22 @@ def generate_owners_mapping(
         Dict[Path, Set[str]]: Map of files to owners.
     """
     revision = create_worktree_commit(default_email)
+    tree = get_git_tree(revision)
 
     def resolve(file: Path) -> Tuple[Path, Set[str]]:
         if file == codeowners_file:
             return (file, set())
 
-        declared = owners_from_head(read_head(file))
-        if declared is not None:
+        if tree.get(file) != BLOB:
+            return (file, get_last_editor(file, rules, revision))
+
+        head = read_stored_head(file, revision)
+
+        if not has_blamable_lines(head):
+            return (file, get_last_editor(file, rules, revision))
+
+        declared = parse_declared_owners(head)
+        if declared:
             return (file, declared)
 
         return (file, get_git_owners(file, rules, revision))

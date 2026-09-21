@@ -3,26 +3,12 @@
 from pathlib import Path
 from typing import Dict, Set
 
-from codeowners.core.content import HEAD_SIZE
 from codeowners.core.rules import (
     equivalent_codeowners,
     format_codeowners,
     parse_codeowners,
 )
 from codeowners.core.users import parse_user_map
-
-
-def read_head(file: Path) -> bytes:
-    """Read the start of a file, in one read.
-
-    Args:
-        file (Path): File to read.
-
-    Returns:
-        bytes: Leading bytes of the file.
-    """
-    with file.open("rb") as head_stream:
-        return head_stream.read(HEAD_SIZE)
 
 
 def load_user_map(user_map_file: Path) -> Dict[str, str]:

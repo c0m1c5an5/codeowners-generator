@@ -1,7 +1,7 @@
 """Reading file content: decoding, classification and declared owners."""
 
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Dict, List, Set
 
 import pytest
 
@@ -9,7 +9,9 @@ from codeowners.core.content import (
     SNIFF_SIZE,
     decode,
     decode_paths,
-    owners_from_head,
+    decode_tree,
+    has_blamable_lines,
+    is_lfs_pointer,
     parse_declared_owners,
     sniff_head,
 )
@@ -50,6 +52,51 @@ def test_tracked_files_are_read_from_nul_delimited_output(
 ) -> None:
     """`git ls-files -z` output names exactly the files git listed."""
     assert decode_paths(raw) == {Path(name) for name in expected}
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(
+            b"100644 blob 4d7a21\tsrc/app.py\x00",
+            {"src/app.py": "blob"},
+            id="a-file",
+        ),
+        pytest.param(
+            b"100644 blob 4d7a21\tsrc/app.py\x00100755 blob 9f2b11\trun.sh\x00",
+            {"src/app.py": "blob", "run.sh": "blob"},
+            id="several-files",
+        ),
+        pytest.param(
+            b"160000 commit 9daf001\tvendor\x00",
+            {"vendor": "commit"},
+            id="a-submodule",
+        ),
+        pytest.param(
+            b"100644 blob 4d7a21\ta file.txt\x00160000 commit 9daf001\tvendor\x00",
+            {"a file.txt": "blob", "vendor": "commit"},
+            id="a-name-with-a-space-beside-a-submodule",
+        ),
+        pytest.param(
+            b"100644 blob 4d7a21\t leading-space.txt\x00",
+            {" leading-space.txt": "blob"},
+            id="a-name-that-starts-with-a-space",
+        ),
+        pytest.param(
+            "100644 blob 4d7a21\tsub/\u0434\u043e\u043a.txt\x00".encode(),
+            {"sub/\u0434\u043e\u043a.txt": "blob"},
+            id="a-name-outside-ascii",
+        ),
+        pytest.param(b"", {}, id="an-empty-revision"),
+        pytest.param(b"100644 blob 4d7a21 no-tab\x00", {}, id="a-record-without-a-tab"),
+    ],
+)
+def test_the_kind_of_each_path_is_read_from_the_tree(
+    raw: bytes,
+    expected: Dict[str, str],
+) -> None:
+    """`git ls-tree -z` output says what git holds at each path."""
+    assert decode_tree(raw) == {Path(path): kind for path, kind in expected.items()}
 
 
 @pytest.mark.parametrize(
@@ -153,25 +200,67 @@ def test_declared_owners_do_not_go_through_the_user_map() -> None:
 
 
 @pytest.mark.parametrize(
-    ("head", "expected"),
+    ("head", "pointer"),
     [
-        pytest.param(b"", set(), id="empty-file-is-settled"),
-        pytest.param(b"\x00\x01\x02", set(), id="binary-file-is-settled"),
-        pytest.param(b"# codeowner: @alice\n", {"@alice"}, id="declaration-is-taken"),
-        pytest.param(b"one\ntwo\n", None, id="silence-is-left-to-the-history"),
         pytest.param(
-            b"\x00# codeowner: @alice\n",
-            set(),
-            id="a-binary-file-declares-nothing",
+            b"version https://git-lfs.github.com/spec/v1\n"
+            b"oid sha256:4d7a214614ab2935c943f9e0ff69d22ea\n"
+            b"size 12345\n",
+            True,
+            id="a-pointer-git-lfs-wrote",
+        ),
+        pytest.param(
+            b"version https://git-lfs.github.com/spec/v1\n",
+            True,
+            id="the-version-line-alone",
+        ),
+        pytest.param(
+            b"# version https://git-lfs.github.com/spec/v1\n",
+            False,
+            id="quoted-in-a-comment",
+        ),
+        pytest.param(b"version 2\n", False, id="another-version-line"),
+        pytest.param(b"", False, id="empty-file"),
+        pytest.param(b"\x89PNG\r\n\x1a\n", False, id="the-content-it-stands-for"),
+    ],
+)
+def test_a_pointer_is_told_from_the_content_it_stands_for(
+    head: bytes,
+    pointer: bool,
+) -> None:
+    """A pointer is recognised by the version line git lfs writes first."""
+    assert is_lfs_pointer(head) == pointer
+
+
+@pytest.mark.parametrize(
+    ("head", "blamable"),
+    [
+        pytest.param(b"one\ntwo\n", True, id="source-is-read-line-by-line"),
+        pytest.param(
+            b"# codeowner: @alice\n", True, id="a-declaration-is-in-its-lines"
+        ),
+        pytest.param("документ\n".encode(), True, id="text-outside-ascii"),
+        pytest.param(b"", False, id="an-empty-file-has-no-lines"),
+        pytest.param(
+            b"\x89PNG\r\n\x1a\n\x00\x00",
+            False,
+            id="a-binary-file-has-no-lines-to-blame",
+        ),
+        pytest.param(
+            b"version https://git-lfs.github.com/spec/v1\n"
+            b"oid sha256:4d7a214614ab2935c943f9e0ff69d22ea\n"
+            b"size 12345\n",
+            False,
+            id="a-pointer-stands-for-content-that-may-not-be-here",
         ),
     ],
 )
-def test_what_a_file_says_about_its_own_owners(
+def test_whether_a_file_can_say_who_wrote_which_part_of_it(
     head: bytes,
-    expected: Optional[Set[str]],
+    blamable: bool,
 ) -> None:
-    """Content settles ownership outright, or defers to blame by saying nothing."""
-    assert owners_from_head(head) == expected
+    """Only a file with readable lines is blamed; the rest go by their history."""
+    assert has_blamable_lines(head) == blamable
 
 
 def test_a_declaration_past_the_head_is_not_read() -> None:

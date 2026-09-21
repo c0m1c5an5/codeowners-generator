@@ -2,13 +2,13 @@
 
 import re
 from pathlib import Path
-from typing import Optional, Set, Tuple
+from typing import Dict, Set, Tuple
 
 TEXTCHARS = bytearray({7, 8, 9, 10, 12, 13, 27} | set(range(0x20, 0x100)) - {0x7F})
 SNIFF_SIZE = 2048
-# Enough both to classify a file and to hold a declared owners block, so
-# neither costs a read of its own.
 HEAD_SIZE = 4096
+TREE_ENTRY_FIELDS = 3
+LFS_POINTER_MARKER = b"version https://git-lfs.github.com/spec/v1"
 DECLARED_OWNER_MARKER = b"codeowner:"
 # Codeowner comment format allows for different single line comment prefixes:
 #     # codeowner: @alice        // codeowner: @bob        -- codeowner: @team
@@ -42,6 +42,27 @@ def decode_paths(raw: bytes) -> Set[Path]:
     return {Path(decode(item)) for item in raw.split(b"\x00") if item}
 
 
+def decode_tree(raw: bytes) -> Dict[Path, str]:
+    r"""Split `git ls-tree` output into the kind of each path.
+
+    Args:
+        raw (bytes): NUL-delimited output, one entry to a record.
+
+    Returns:
+        Dict[Path, str]: Kind of entry the tree holds at each path.
+    """
+    tree: Dict[Path, str] = {}
+
+    for record in raw.split(b"\x00"):
+        (entry, tab, path) = decode(record).partition("\t")
+        fields = entry.split(" ")
+
+        if tab and len(fields) == TREE_ENTRY_FIELDS:
+            tree[Path(path)] = fields[1]
+
+    return tree
+
+
 def sniff_head(head: bytes) -> Tuple[bool, bool]:
     """Check whether a file is empty and whether it is binary.
 
@@ -54,6 +75,18 @@ def sniff_head(head: bytes) -> Tuple[bool, bool]:
     sample = head[:SNIFF_SIZE]
 
     return (not sample, bool(sample.translate(None, TEXTCHARS)))
+
+
+def is_lfs_pointer(head: bytes) -> bool:
+    """Check whether a file is a Git LFS pointer, not the content it stands for.
+
+    Args:
+        head (bytes): Leading bytes of the file.
+
+    Returns:
+        bool: Whether the file is a pointer.
+    """
+    return head.startswith(LFS_POINTER_MARKER)
 
 
 def parse_declared_owners(head: bytes) -> Set[str]:
@@ -86,20 +119,15 @@ def parse_declared_owners(head: bytes) -> Set[str]:
     return owners
 
 
-def owners_from_head(head: bytes) -> Optional[Set[str]]:
-    """Decide what a file's own content says about its owners.
+def has_blamable_lines(head: bytes) -> bool:
+    """Check whether a file's own lines can say who wrote which part of it.
 
     Args:
         head (bytes): Leading bytes of the file.
 
     Returns:
-        Optional[Set[str]]: The owners the file declares, an empty set when
-            the file cannot be owned at all, or None when its content settles
-            nothing and its history has to be blamed.
+        bool: Whether the file can be blamed line by line.
     """
     (empty, binary) = sniff_head(head)
 
-    if empty or binary:
-        return set()
-
-    return parse_declared_owners(head) or None
+    return not (empty or binary or is_lfs_pointer(head))
