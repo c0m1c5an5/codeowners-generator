@@ -2,7 +2,7 @@
 
 import re
 from pathlib import Path
-from typing import Dict, Iterable, Set
+from typing import Dict, Iterable, List, Set, Tuple
 
 MINIMUM_RULE_TOKENS = 2
 # What a path has to be escaped against: the whitespace that separates the
@@ -19,6 +19,12 @@ RULE_FIELD_RE = re.compile(r"(?:\\.|[^\s\\])+")
 # A leading `#` opens a comment and a leading `[` a section, so a rule states
 # neither.
 RULE_PREFIXES_IGNORED = ("#", "[")
+# The boundaries the generated rules are written between, armoured the way
+# openssh and gpg armour a block of their own. Both are comments, so a reader
+# of the file passes over them, and whatever a hand writes outside them is
+# left where it was written.
+BEGIN_BOUNDARY = "# -----BEGIN CODEOWNERS-----"
+END_BOUNDARY = "# -----END CODEOWNERS-----"
 
 
 def escape_path(file: str) -> str:
@@ -146,3 +152,67 @@ def equivalent_codeowners(
         bool: Whether rewriting the file would leave its rules unchanged.
     """
     return stated_rules == render_codeowners(owners_mapping)
+
+
+def find_closing_boundary(stated: List[str], begin: int) -> int:
+    """Find where the generated rules end.
+
+    An opening boundary with nothing closing it takes the rest of the file, so
+    that a closing line lost to an edit costs the rules below it rather than
+    the hand written ones above.
+
+    Args:
+        stated (List[str]): Lines of a codeowners file, each stripped.
+        begin (int): Line the opening boundary is stated on.
+
+    Returns:
+        int: Line the closing boundary is stated on, or the end of the file.
+    """
+    following = stated[begin:]
+
+    if END_BOUNDARY in following:
+        return begin + following.index(END_BOUNDARY)
+
+    return len(stated)
+
+
+def split_boundaries(stated: str) -> Tuple[List[str], List[str], List[str]]:
+    """Split a codeowners file at the boundaries the generated rules sit between.
+
+    A file stating no boundaries is one this tool wrote before it stated any,
+    so all of it is taken as generated.
+
+    Args:
+        stated (str): Contents of a codeowners file.
+
+    Returns:
+        Tuple[List[str], List[str], List[str]]: The lines written above, between
+            and below the boundaries, the boundaries themselves left out.
+    """
+    lines = stated.splitlines()
+    boundaries = [line.strip() for line in lines]
+
+    if BEGIN_BOUNDARY not in boundaries:
+        return ([], lines, [])
+
+    begin = boundaries.index(BEGIN_BOUNDARY)
+    end = find_closing_boundary(boundaries, begin)
+
+    return (lines[:begin], lines[begin + 1 : end], lines[end + 1 :])
+
+
+def frame_codeowners(stated: str, rules: str) -> str:
+    """Write generated rules between the boundaries, leaving every other line.
+
+    Args:
+        stated (str): Contents the codeowners file already has.
+        rules (str): Generated rules, as `format_codeowners` states them.
+
+    Returns:
+        str: Contents stating these rules between the boundaries, and outside
+            them only what was written there by hand.
+    """
+    (above, _, below) = split_boundaries(stated)
+    generated = (BEGIN_BOUNDARY, *rules.splitlines(), END_BOUNDARY)
+
+    return "\n".join((*above, *generated, *below)) + "\n"

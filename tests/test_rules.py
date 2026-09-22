@@ -1,7 +1,7 @@
 """The codeowners file format: what is written, and what is read back."""
 
 from pathlib import Path
-from typing import Dict, Set
+from typing import Dict, List, Set
 
 import pytest
 
@@ -11,8 +11,10 @@ from codeowners.core.rules import (
     escape_owner,
     escape_path,
     format_codeowners,
+    frame_codeowners,
     parse_codeowners,
     render_codeowners,
+    split_boundaries,
 )
 
 # Named, so that the characters the format reserves stay visible in the tables.
@@ -199,3 +201,165 @@ def test_rules_are_read_from_the_lines_that_state_them() -> None:
         "src/app.js": {"@alice", "@bob"},
         "docs/": {"@carol"},
     }
+
+
+@pytest.mark.parametrize(
+    ("stated", "above", "generated", "below"),
+    [
+        pytest.param("", [], [], [], id="an-empty-file"),
+        pytest.param(
+            "\n".join(("*.md @docs", "src/main.py @alice")),
+            [],
+            ["*.md @docs", "src/main.py @alice"],
+            [],
+            id="a-file-stating-no-boundaries",
+        ),
+        pytest.param(
+            "\n".join(
+                (
+                    "*.md @docs",
+                    "# -----BEGIN CODEOWNERS-----",
+                    "src/main.py @alice",
+                    "# -----END CODEOWNERS-----",
+                    "LICENSE @legal",
+                )
+            ),
+            ["*.md @docs"],
+            ["src/main.py @alice"],
+            ["LICENSE @legal"],
+            id="rules-written-above-and-below",
+        ),
+        pytest.param(
+            "\n".join(
+                (
+                    "# -----BEGIN CODEOWNERS-----",
+                    "# -----END CODEOWNERS-----",
+                )
+            ),
+            [],
+            [],
+            [],
+            id="boundaries-around-nothing",
+        ),
+        pytest.param(
+            "\n".join(
+                (
+                    "*.md @docs",
+                    "   # -----BEGIN CODEOWNERS-----   ",
+                    "src/main.py @alice",
+                    "\t# -----END CODEOWNERS-----",
+                )
+            ),
+            ["*.md @docs"],
+            ["src/main.py @alice"],
+            [],
+            id="indented-boundaries",
+        ),
+        pytest.param(
+            "\n".join(
+                (
+                    "*.md @docs",
+                    "# -----BEGIN CODEOWNERS-----",
+                    "src/main.py @alice",
+                )
+            ),
+            ["*.md @docs"],
+            ["src/main.py @alice"],
+            [],
+            id="a-boundary-left-unclosed",
+        ),
+    ],
+)
+def test_a_file_is_split_at_the_boundaries_it_states(
+    stated: str,
+    above: List[str],
+    generated: List[str],
+    below: List[str],
+) -> None:
+    """What a hand wrote outside the boundaries is told apart from what is inside."""
+    assert split_boundaries(stated) == (above, generated, below)
+
+
+def test_rules_are_written_between_the_boundaries() -> None:
+    """A file that states no boundaries is written with them."""
+    written = frame_codeowners("", format_codeowners({Path("a.txt"): {"@alice"}}))
+
+    assert written == "\n".join(
+        (
+            "# -----BEGIN CODEOWNERS-----",
+            "a.txt @alice",
+            "# -----END CODEOWNERS-----",
+            "",
+        )
+    )
+
+
+def test_what_a_hand_wrote_outside_the_boundaries_is_left_there() -> None:
+    """The point of the boundaries: rules written around them survive a run."""
+    stated = "\n".join(
+        (
+            "# Owned whatever the blame says",
+            "*.md @docs",
+            "",
+            "# -----BEGIN CODEOWNERS-----",
+            "gone.txt @nobody",
+            "# -----END CODEOWNERS-----",
+            "",
+            "LICENSE @legal",
+        )
+    )
+
+    written = frame_codeowners(stated, format_codeowners({Path("a.txt"): {"@alice"}}))
+
+    assert written == "\n".join(
+        (
+            "# Owned whatever the blame says",
+            "*.md @docs",
+            "",
+            "# -----BEGIN CODEOWNERS-----",
+            "a.txt @alice",
+            "# -----END CODEOWNERS-----",
+            "",
+            "LICENSE @legal",
+            "",
+        )
+    )
+
+
+def test_owning_nothing_writes_boundaries_around_nothing() -> None:
+    """Nothing owned states no rules, and still says where they would be written."""
+    stated = "\n".join(
+        (
+            "*.md @docs",
+            "# -----BEGIN CODEOWNERS-----",
+            "gone.txt @nobody",
+            "# -----END CODEOWNERS-----",
+        )
+    )
+
+    assert frame_codeowners(stated, format_codeowners({})) == "\n".join(
+        (
+            "*.md @docs",
+            "# -----BEGIN CODEOWNERS-----",
+            "# -----END CODEOWNERS-----",
+            "",
+        )
+    )
+
+
+def test_a_framed_file_is_read_back_as_the_rules_it_was_written_from() -> None:
+    """What `--preserve` relies on: only the generated rules are compared."""
+    mapping = {Path("a.txt"): {"@alice"}}
+    written = frame_codeowners("*.md @docs\n", format_codeowners(mapping))
+
+    (_, generated, _) = split_boundaries(written)
+
+    assert equivalent_codeowners(parse_codeowners(generated), mapping)
+
+
+def test_writing_the_same_rules_twice_writes_the_same_file() -> None:
+    """A second run over a written file leaves it exactly as it was."""
+    rules = format_codeowners({Path("a.txt"): {"@alice"}})
+    written = frame_codeowners("*.md @docs\n", rules)
+
+    assert frame_codeowners(written, rules) == written

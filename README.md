@@ -28,5 +28,25 @@ Example user map file (compatible with .gitownrc):
 }
 ```
 
+### Static rules
+Only the rules between the boundaries are rewritten, so anything written
+outside them is kept from run to run:
+
+```
+# Kept, and matched first
+*.lock @build-team
+
+# -----BEGIN CODEOWNERS-----
+src/main.py @alice
+# -----END CODEOWNERS-----
+
+# Kept, and wins over the generated rules above it
+security/ @security
+```
+
+The last rule that matches a file is the one that applies, so a static rule
+that has to override a generated one goes below the closing boundary. A file
+without boundaries is rewritten whole, and written back with them.
+
 # Issues and proposals
 Feel free to create an issue, report a bug or suggest improvements in the "Issues" section.
